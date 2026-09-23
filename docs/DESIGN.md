@@ -2,9 +2,10 @@
 
 > Status: this is the required direction, not a claim that it works. Each
 > section says whether it is **implemented** (code in this tree, with the test
-> that exercises it named), or **design** (nothing built yet). Nothing in this
-> document has been observed inside the game or under Wine; every test named
-> here runs on a Linux host with no display and no network.
+> that exercises it named), a **spike**, or **design** (nothing built yet).
+> Nothing in this document has been observed inside the game or under Wine;
+> every test named here runs on a Linux host (the Incus builder) with no
+> display, and passes inside a network namespace that has only `lo`.
 
 The owner's brief: "a sort of friend list and our own comms net with calls and
 video and text — maybe even nostr", for FFXIV players, driven from a Dalamud
@@ -14,20 +15,74 @@ talk to the game, read game memory, or send game commands, and it never will
 
 ## Status at a glance
 
-| Piece | State |
-| --- | --- |
-| Device identity (iroh key in SQLite) | implemented in the scaffold |
-| Gossip rooms, room presence, blobs, direct connections | implemented in the scaffold |
-| Friend invites, friend list, presence heartbeat, 1:1 text | design (this document) |
-| Group channels over iroh-gossip | design (rooms exist; channel invites do not) |
-| C ABI for the above | design |
-| CLI demo | design |
-| nostr: device list, invites over relays | design |
-| nostr: NIP-17 offline mailbox, NIP-05 names | design |
-| Calls and video (moq over iroh) | design |
-| Anything under Wine or in the game | not observed |
+| Piece | State | Evidence |
+| --- | --- | --- |
+| Device identity (iroh key in SQLite) | implemented | `identity_survives_a_restart`, `store::tests` |
+| Gossip rooms, room presence, blobs, direct connections | implemented (scaffold) | `two_nodes_meet_talk_and_share_a_file` |
+| Friend invites, friend list, presence heartbeat, 1:1 text | implemented | `tests/friends.rs` |
+| Group channels over iroh-gossip, channel invites | implemented | `tests/friends.rs`, `tests/demo.rs` |
+| C ABI for the above, `include/linkpearl.h` in sync | implemented | `tests/abi_friends.rs`, `the_header_matches_the_exports_and_constants` |
+| C# binding for the above | implemented | `Linkpearl.Tests/FriendTests.cs` against `liblinkpearl.so` |
+| CLI demo (`linkpearl`) | implemented | `crates/linkpearl-cli/tests/demo.rs`, `scripts/demo.sh` |
+| nostr: device list, invites over relays (feature `nostr`) | implemented | `tests/nostr.rs` against an in-process relay |
+| nostr: NIP-17 offline mailbox for texts, NIP-05 names | design | — |
+| nostr in the C ABI | design | — |
+| Call signalling (feature `calls`) | spike | `tests/calls.rs` |
+| Call media (moq over iroh, sidecar) | design | — |
+| `linkpearl.dll` for `x86_64-pc-windows-gnu` | builds | `cargo build --target x86_64-pc-windows-gnu -p linkpearl-ffi` |
+| Anything under Wine or in the game | not observed | — |
 
 This table is kept current by the commits that change it.
+
+### Try it
+
+Builds and tests run in the Incus builder, never on the machine the game runs
+on:
+
+```sh
+scripts/sync-to-builder.sh
+incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && cargo test --workspace'
+incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && scripts/demo.sh'
+# everything, including nostr and the calls spike:
+incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && cargo test --workspace \
+    --features linkpearl-core/nostr,linkpearl-core/calls,linkpearl-cli/nostr'
+```
+
+By hand, two terminals on one machine (relays off, so only direct paths):
+
+```text
+A$ linkpearl --db alice.sqlite --name Alice --relay off
+B$ linkpearl --db bob.sqlite --name Bob --relay off
+A> /invite                      -> invite lpfriend...
+B> /accept lpfriend...          -> friend added: Alice
+B> /msg alice hello             A sees: <Bob> hello; B sees: delivered [...]
+A> /status away crafting        B sees: * Alice is away "crafting"
+A> /channel new static
+A> /channel invite Bob          B sees: /channel join lproom...
+B> /channel join lproom...
+A> pull in 5                    B sees: #static <Alice> pull in 5
+```
+
+With `--relay off` a friend's stored address is only as good as their port;
+`--port` pins it so a restarted node is still where friends last saw it. With
+the default relay mode, iroh's n0 relays and DNS lookup find a NodeId wherever
+it is — that path is not exercised by any test here, because the tests run
+without a network.
+
+### Known gaps in what is implemented
+
+* Texts are addressed to a device, not a person; fan-out to all of a
+  friend's devices is not built.
+* No per-peer rate limits on friend links or rooms; event queues are bounded
+  and count drops, which is the only protection.
+* Channels have no history for late joiners, no ordering and no encryption
+  beyond each QUIC hop; anyone holding the ticket can read.
+* `lp_stats.relayed_conns` is still always 0 (scaffold); friend links are not
+  counted in `lp_stats` at all.
+* nostr and call signalling are not in the C ABI; if a build enables them,
+  their events reach `lp_poll` as `LP_EV_LOG` lines.
+* The C# binding is tested against `liblinkpearl.so` on Linux only; the DLL
+  has never been loaded by Dalamud.
 
 ## Processes and layers
 
@@ -60,7 +115,7 @@ connection, and what signs every gossip frame (`proto::encode`). Two installs �
 the Windows PC and the Steam Deck — are two NodeIds. Losing the file loses the
 identity; there is deliberately no recovery path at this layer.
 
-**User identity (design, nostr).** A person is optionally a nostr keypair
+**User identity (implemented behind feature `nostr`).** A person is optionally a nostr keypair
 (secp256k1, NIP-01). It is portable across devices and never required. The
 user key publishes a **device list**: a parameterised-replaceable event (NIP-78
 application data, kind 30078, `d` = `ffxiv-linkpearl/devices`) whose content
@@ -73,8 +128,9 @@ A friend who knows your nostr pubkey can therefore find all your devices, and a
 new device joins your friend list everywhere by being added to the device list,
 not by re-inviting every friend.
 
-The nostr secret is stored beside the device key (a `nostr_identity` table),
-generated or imported. A NIP-46 remote signer is the right answer for people who
+The nostr secret is stored beside the device key (the `profile` table, keys
+`nostr_secret`/`nostr_pubkey`), generated or imported (`nostr_keys`,
+`nostr_import`). A NIP-46 remote signer is the right answer for people who
 already keep their nsec elsewhere; that is later work.
 
 ## Friend list
@@ -87,10 +143,14 @@ friend_devices (node_id BLOB PRIMARY KEY, friend_id REFERENCES friends ON DELETE
                 addr BLOB NULL,            -- last known iroh EndpointAddr (postcard)
                 added_at, last_seen)
 invites        (secret BLOB PRIMARY KEY, created_at, expires_at, redeemed_by, redeemed_at)
+messages       (peer, outgoing, msg_id, body, sent_at, delivered_at)  -- 1:1 history + outbox
+profile        (key, value)                                           -- name, status, note, nostr
 ```
 
 Without nostr, one invite yields one friend with one device. With nostr, a
 friend is keyed by pubkey and their devices come from the verified device list.
+
+**Implemented** (`crates/linkpearl-core/src/node/friends.rs`, store schema 2).
 
 **Adding a friend is mutual and needs an invite ticket.** There is no directory
 and no "add by name" without nostr.
@@ -122,7 +182,7 @@ Two kinds, deliberately separate:
 
 * **Room presence (implemented in the scaffold).** An opaque payload per gossip
   room, re-announced to new neighbours (`Frame::Presence`, `Frame::Hello`).
-* **Friend presence (design).** A heartbeat over each friend link. Each node
+* **Friend presence (implemented).** A heartbeat over each friend link. Each node
   sends `Heartbeat { status, note }` every interval (15 s by default) to every
   connected friend device and dials friends it has no link to, with backoff. A
   friend is online from their first `Hello`/`Heartbeat` until their link closes
@@ -133,7 +193,7 @@ Two kinds, deliberately separate:
 
 ## Text
 
-**1:1 (design).** Over the friend link: one QUIC uni stream per frame, postcard
+**1:1 (implemented).** Over the friend link: one QUIC uni stream per frame, postcard
 encoded, capped at `MAX_MESSAGE`. A text is `Text { id, sent_at, body }` where
 `id` is a random u64 chosen by the sender. The receiver stores it keyed by
 `(peer, id)`, raises `FriendText` only the first time, and always answers
@@ -143,7 +203,7 @@ device comes up, so delivery is at-least-once on the wire and exactly-once to
 the UI. Messages are addressed to a device; fanning out to all of a friend's
 devices is the nostr-era change.
 
-**Group channels (design, rooms implemented).** A channel is a gossip room with
+**Group channels (implemented).** A channel is a gossip room with
 a random 32-byte key (`Scope::Custom`), so its topic cannot be guessed. Every
 frame is signed by its author and verified on arrival (`proto.rs`), so a relay
 node in the swarm cannot forge or re-attribute. A channel is shared by a room
@@ -168,12 +228,23 @@ size, timing and the recipient's pubkey — not the sender or the content.
 
 nostr is optional plumbing, never a requirement. Two players on the same LAN, or
 two players with an invite ticket and working hole punching, never touch it.
-Behind the cargo feature `nostr`:
+Behind the cargo feature `nostr` (`src/nostr.rs`, `src/node/nostr.rs`); the
+device list and invites are **implemented**, the rest is design:
 
-* **Bootstrap and discovery.** Fetch a friend's device list (above) to learn
-  their current NodeIds; publish your own when your devices change.
-* **Invites over relays.** Send an `lpfriend` ticket to an npub as a NIP-17 DM,
-  and read incoming ones on start. This replaces "paste a ticket in a tell".
+* **Bootstrap and discovery (implemented).** `nostr_publish_devices` publishes
+  the list, merging the devices the current list already proves (a second
+  device imports the same nsec with `nostr_import`); `nostr_fetch_devices`
+  reads and verifies one. Replacement lists are always strictly newer, since
+  relays refuse a same-second replacement. A friend is bound to a nostr key
+  only when a verified list names their device — a key inside an invite is a
+  hint, never trusted — and binding merges one person's devices into one
+  friend.
+* **Invites over relays (implemented).** `nostr_send_invite` sends an
+  `lpfriend` ticket to an npub as a NIP-17 DM tagged `["linkpearl","invite/1"]`;
+  `nostr_check_inbox` raises `NostrInvite` for each one that is not expired,
+  not ours, and not from a device that is already a friend. Nothing is
+  redeemed automatically. Relays keep gift wraps, so a pending invite is
+  raised again on every check until it is accepted or expires.
 * **Offline mailbox.** NIP-17 as above.
 * **Names.** NIP-05 (`name@domain`) resolves to a pubkey, which resolves to
   devices. Display names in Linkpearl are otherwise self-asserted and only as
@@ -214,7 +285,7 @@ by winegstreamer and so by whatever GStreamer plugins the host happens to have,
 spends the frame budget and turns a codec crash into a game crash. So:
 
 * **In the game (plugin + linkpearl.dll):** call signalling over the friend
-  link (`CallRing`, `CallAccept`, `CallHangup`, carrying a moq path and the
+  link (`CallRing`, `CallAnswer`, `CallHangup`, carrying a moq path and the
   host's NodeId), the roster and mute state in the UI, and at most a tiny video
   preview supplied as already-decoded frames.
 * **In a native sidecar (`linkpearl-media`, a Linux process on Linux, a Windows
@@ -228,14 +299,21 @@ spends the frame budget and turns a codec crash into a game crash. So:
   and the caller connects to `iroh://<callee>/call/<id>`. **Group calls** use a
   moq-relay somebody runs (an FC relay), or a small mesh for three or four.
 
+**Signalling spike (feature `calls`, `src/node/calls.rs`).** `call_ring`,
+`call_answer`, `call_hangup` send `CallRing { call, media }`,
+`CallAnswer`, `CallHangup` over the friend link, where `media` is
+`iroh://<caller node>/call/<id>` — the URL form `moq-native` accepts. Every
+call with a friend ends when their link drops. That is all: no media moves,
+moq is not linked, and none of it is in the C ABI.
+
 **Next steps, in order,** each one an observable result:
 
 1. Build `moq-native` with `iroh` against this workspace's iroh and publish one
    Opus track from one host process to another over a relay-less endpoint.
 2. Same, but with the endpoint shared with `linkpearl-core` (merged ALPNs), so
    a friend link and a moq session live on one NodeId.
-3. Add `CallRing`/`CallAccept`/`CallHangup` to the friend wire, behind a
-   `calls` cargo feature, with a two-node test that only exchanges signalling.
+3. ~~Call signalling on the friend wire behind `calls`, with a two-node test.~~
+   Done as the spike above; it still needs the C ABI and a UI decision.
 4. A `linkpearl-media` sidecar with PipeWire capture and playback, paired to a
    host node by ticket; measure latency and CPU on the host.
 5. Only then: try `moq-audio` inside `linkpearl.dll` under Wine, in a test
