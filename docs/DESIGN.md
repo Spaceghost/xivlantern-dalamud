@@ -29,8 +29,11 @@ talk to the game, read game memory, or send game commands, and it never will
 | nostr in the C ABI | design | — |
 | Call signalling (feature `calls`) | spike | `tests/calls.rs` |
 | Call media (moq over iroh, sidecar) | design | — |
-| `linkpearl.dll` for `x86_64-pc-windows-gnu` | builds | `cargo build --target x86_64-pc-windows-gnu -p linkpearl-ffi` |
-| Anything under Wine or in the game | not observed | — |
+| `linkpearl.dll` for `x86_64-pc-windows-gnu` | builds; selftest passes under stock Wine 11 | [WINE.md](WINE.md) |
+| Blocking, per-peer rate limits, size limits | implemented | `tests/safety.rs` |
+| Author channel (signed announcements), support messages | implemented | `tests/safety.rs`, `crates/linkpearl-cli/tests/demo.rs` |
+| Dalamud plugin (XivLinkpearl) | builds; host tests only | `tests/XivLinkpearl.Core.Tests` |
+| Anything in the game, or in the game's Wine prefix | not observed | — |
 
 This table is kept current by the commits that change it.
 
@@ -369,14 +372,9 @@ player's plugin config directory.
 
 ## Under Wine
 
-`ghostty-multiagent` (commit `e2bfd8a`) needed a patched `iroh-quinn-udp`
-0.5.7 for iroh 0.35 inside Wine: an `IPV6_V6ONLY` query on IPv4 sockets that
-Wine answers with `WSAEOPNOTSUPP`, and `IP_RECVECN`/`IP_PKTINFO`/`IP_DONTFRAGMENT`
-treated as fatal. This tree uses iroh 1.2, whose socket layer is `noq-udp`
-1.3.0. Reading that crate's `src/windows.rs`: it only queries `IPV6_V6ONLY` for
-IPv6 sockets, treats `WSAEOPNOTSUPP`/`WSAENOPROTOOPT` on all six options as
-"unsupported, carry on", and disables `IP_PKTINFO` when it detects Wine. So both
-fixes are already upstream and nothing is vendored here. The ghostty patch also
-tolerated `WSAEINVAL`; `noq-udp` does not. If `linkpearl.dll` fails to bind
-under Wine with `WSAEINVAL`, vendor `noq-udp` into `crates/patched/` with that
-one change. None of this has been run under Wine for `linkpearl.dll` yet.
+See [WINE.md](WINE.md). On 2026-09-23, `linkpearl.dll` (x86_64-pc-windows-gnu)
+bound, passed its direct and n0-relay selftest, and interoperated with a native
+node under stock Wine 11.0 in a container. `noq-udp` 1.3.0 already carries both
+of the Wine fixes ghostty-multiagent had to patch into `iroh-quinn-udp`, so
+nothing is vendored. None of this is the game's Wine or the game's prefix;
+`/linkpearl selftest` in game is the proof that is still missing.
