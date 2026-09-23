@@ -1,5 +1,7 @@
 //! The node: a synchronous handle in front of an async world.
 
+#[cfg(feature = "calls")]
+mod calls;
 mod friends;
 #[cfg(feature = "nostr")]
 mod nostr;
@@ -107,6 +109,9 @@ struct Shared {
     links: Mutex<HashMap<EndpointId, Connection>>,
     /// Open invites: secret -> expiry (unix seconds, 0 = never).
     invites: Mutex<HashMap<[u8; 16], i64>>,
+    /// Calls being set up or in progress (spike, feature `calls`): id -> peer.
+    #[cfg_attr(not(feature = "calls"), allow(dead_code))]
+    calls: Mutex<HashMap<u64, EndpointId>>,
     me: RwLock<friends::Me>,
 }
 
@@ -706,6 +711,7 @@ impl Node {
             friends: RwLock::new(HashMap::new()),
             links: Mutex::new(HashMap::new()),
             invites: Mutex::new(HashMap::new()),
+            calls: Mutex::new(HashMap::new()),
             me: RwLock::new(friends::Me::default()),
         });
         friends::load(&shared)?;

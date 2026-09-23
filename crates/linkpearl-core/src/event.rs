@@ -155,4 +155,17 @@ pub enum Event {
         user: [u8; 32],
         devices: Vec<PeerId>,
     },
+
+    // ---------------------------------------- calls (feature `calls`, spike)
+    /// A friend is calling. `media` is the moq URL their media sidecar will
+    /// serve (`iroh://<node>/call/<id>`); nothing carries media yet.
+    CallIncoming { peer: PeerId, call: u64, media: String },
+    /// The callee answered a call we placed.
+    CallAnswered {
+        peer: PeerId,
+        call: u64,
+        accepted: bool,
+    },
+    /// Hung up by either side, or the friend link dropped.
+    CallEnded { peer: PeerId, call: u64 },
 }

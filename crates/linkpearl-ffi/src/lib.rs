@@ -594,6 +594,15 @@ pub unsafe extern "C" fn lp_poll(
                     slot.handle = handle;
                     Some(format!("nostr: {} devices", devices.len()).into_bytes())
                 }
+                // Call signalling is a spike behind the `calls` feature and not
+                // in the C ABI.
+                Event::CallIncoming { call, .. }
+                | Event::CallAnswered { call, .. }
+                | Event::CallEnded { call, .. } => {
+                    slot.kind = LP_EV_LOG;
+                    slot.handle = call;
+                    Some(b"call signalling event (not in the C ABI yet)".to_vec())
+                }
             };
             if let Some(bytes) = payload {
                 slot.data_len = bytes.len() as u32;
