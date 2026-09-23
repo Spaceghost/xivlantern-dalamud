@@ -1,0 +1,5 @@
+root = true
+
+[*.cs]
+# a braced case body sits under its label, as the code is written
+csharp_indent_case_contents_when_block = false

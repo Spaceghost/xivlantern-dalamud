@@ -20,8 +20,8 @@ exec 3>"$DIR/alice.in" 4>"$DIR/bob.in"
 
 # wait_for <who> <text>: block until the transcript contains the text.
 wait_for() {
-  local file="$DIR/$1.out" i
-  for i in $(seq 1 150); do
+  local file="$DIR/$1.out"
+  for _ in $(seq 1 150); do
     grep -qF -- "$2" "$file" && return 0
     sleep 0.2
   done

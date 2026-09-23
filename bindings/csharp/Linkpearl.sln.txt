@@ -1,4 +1,0 @@
-Build with:
-  cargo build -p linkpearl-ffi          # target/debug/liblinkpearl.so
-  LINKPEARL_NATIVE_DIR=$PWD/target/debug dotnet test bindings/csharp/Linkpearl.Tests
-Without LINKPEARL_NATIVE_DIR the native test is skipped, not failed.

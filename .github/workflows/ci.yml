@@ -1,0 +1,79 @@
+# Every push and pull request: the Rust network layer (tests, then the Windows DLL), the
+# C# binding against it, the plugin's manifest, build, tests and packaging. GitHub-hosted
+# runners only; nothing here touches a machine of the author's, and nothing needs the game.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linkpearl:
+    name: Network layer and Dalamud plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DALAMUD_HOME: ${{ github.workspace }}/.dalamud
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Check the plugin manifest
+        run: tools/check-manifest.py
+
+      - name: Check that CHANGELOG.md matches changelog.json
+        run: tools/changelog.py --check
+
+      - name: Rust toolchain for Linux and x86_64-pc-windows-gnu
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-gnu
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-mingw-w64-x86-64
+
+      # Relays are off in every test; nothing here needs the internet beyond crates.io.
+      - name: Test the network layer
+        run: cargo test --workspace --locked
+
+      - name: Test with nostr and the calls spike
+        run: cargo test --workspace --locked --features linkpearl-core/nostr,linkpearl-core/calls,linkpearl-cli/nostr
+
+      - name: Build linkpearl.dll (Windows) and liblinkpearl.so
+        run: tools/build-native.sh
+
+      - name: Test the C# binding against liblinkpearl.so
+        run: LINKPEARL_NATIVE_DIR="$(cd .. && pwd)/ffxiv-linkpearl-build/native/linux" dotnet test bindings/csharp/Linkpearl.Tests -c Release
+
+      - name: Fetch the Dalamud reference assemblies
+        run: tools/fetch-dalamud.sh
+
+      - name: Test the plugin's logic
+        run: dotnet test tests/XivLinkpearl.Core.Tests -c Release
+
+      - name: Build the plugin
+        run: dotnet build src/XivLinkpearl.Plugin/XivLinkpearl.Plugin.csproj -c Release
+
+      - name: Package (the release path, run on every push)
+        env:
+          OUT: ${{ runner.temp }}/release
+        run: tools/package.sh
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xivlinkpearl-plugin-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 14
