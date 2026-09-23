@@ -35,6 +35,8 @@ commands:
   /channel ticket             print the current channel's ticket
   /channels                   list joined channels
   /say <text>                 send to the current channel (or just type)
+  /nostr id|import <nsec>|publish|devices <npub>|invite <npub> [ttl]|inbox
+                              (built with --features nostr; needs --nostr-relay)
   /quit";
 
 struct Args {
@@ -43,11 +45,12 @@ struct Args {
     relay: RelayMode,
     port: Option<u16>,
     heartbeat_ms: Option<u64>,
+    nostr_relays: Vec<String>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: linkpearl [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N]\n\n{HELP}"
+        "usage: linkpearl [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N] [--nostr-relay WS_URL]...\n\n{HELP}"
     );
     std::process::exit(2)
 }
@@ -59,6 +62,7 @@ fn parse_args() -> Args {
         relay: RelayMode::Default,
         port: None,
         heartbeat_ms: None,
+        nostr_relays: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -75,6 +79,7 @@ fn parse_args() -> Args {
             }
             "--port" => args.port = Some(value().parse().unwrap_or_else(|_| usage())),
             "--heartbeat-ms" => args.heartbeat_ms = Some(value().parse().unwrap_or_else(|_| usage())),
+            "--nostr-relay" => args.nostr_relays.push(value()),
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -98,6 +103,8 @@ struct Cli {
     channels: Vec<RoomHandle>,
     current: Option<RoomHandle>,
     running: bool,
+    #[cfg_attr(not(feature = "nostr"), allow(dead_code))]
+    nostr_relays: Vec<String>,
 }
 
 impl Cli {
@@ -253,7 +260,65 @@ impl Cli {
                 }
             }
             "/say" => return self.say(rest),
+            "/nostr" => return self.nostr(rest),
             _ => return Err(format!("unknown command {cmd}; /help")),
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "nostr"))]
+    fn nostr(&mut self, _: &str) -> Result<(), String> {
+        Err("this linkpearl was built without --features nostr".into())
+    }
+
+    #[cfg(feature = "nostr")]
+    fn nostr(&mut self, rest: &str) -> Result<(), String> {
+        let e = |e: linkpearl_core::Error| e.to_string();
+        let (sub, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let arg = arg.trim();
+        let relays = &self.nostr_relays;
+        let need_relays = || {
+            if relays.is_empty() {
+                Err("no relays: start with --nostr-relay wss://...".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        match sub {
+            "id" => {
+                self.node.nostr_keys().map_err(e)?;
+                println!("nostr {}", self.node.nostr_npub().unwrap_or_default());
+            }
+            "import" => {
+                self.node.nostr_import(arg).map_err(e)?;
+                println!("nostr {}", self.node.nostr_npub().unwrap_or_default());
+            }
+            "publish" => {
+                need_relays()?;
+                let h = self.node.nostr_publish_devices(relays).map_err(e)?;
+                println!("publishing device list (#{h})...");
+            }
+            "devices" => {
+                need_relays()?;
+                let h = self.node.nostr_fetch_devices(relays, arg).map_err(e)?;
+                println!("looking up devices (#{h})...");
+            }
+            "invite" => {
+                need_relays()?;
+                let (who, ttl) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
+                let ttl = match ttl.trim() {
+                    "" => None,
+                    s => Some(Duration::from_secs(s.parse().map_err(|_| "ttl is seconds")?)),
+                };
+                let h = self.node.nostr_send_invite(relays, who, ttl).map_err(e)?;
+                println!("sending invite (#{h})...");
+            }
+            "inbox" => {
+                need_relays()?;
+                let h = self.node.nostr_check_inbox(relays).map_err(e)?;
+                println!("checking inbox (#{h})...");
+            }
+            _ => return Err("usage: /nostr id|import|publish|devices|invite|inbox".into()),
         }
         Ok(())
     }
@@ -329,6 +394,20 @@ impl Cli {
                 String::from_utf8_lossy(&data)
             ),
             Event::Error { message } => println!("error: {message}"),
+            Event::NostrDone { handle, ok, detail } => {
+                println!("nostr #{handle} {}: {detail}", if ok { "done" } else { "failed" })
+            }
+            Event::NostrInvite { from, ticket } => {
+                println!("nostr invite from {}; to accept:", hex(&from));
+                println!("/accept {ticket}");
+            }
+            Event::NostrDevices { user, devices, .. } => {
+                println!("nostr {} has {} device(s):", short(&user), devices.len());
+                for d in devices {
+                    let tag = if self.names.contains_key(&d) { " (friend)" } else { "" };
+                    println!("  {}{tag}", hex(&d));
+                }
+            }
             // Blob, direct-connection and log events are not part of this demo.
             _ => {}
         }
@@ -364,6 +443,7 @@ fn main() {
         channels: Vec::new(),
         current: None,
         running: true,
+        nostr_relays: args.nostr_relays,
     };
     cli.refresh_names();
 

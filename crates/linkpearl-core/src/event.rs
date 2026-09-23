@@ -137,4 +137,22 @@ pub enum Event {
     /// A friend invited us to a channel. Nothing is joined until the caller
     /// passes the ticket to `room_join`.
     ChannelInvite { peer: PeerId, ticket: String },
+
+    // --------------------------------------------- nostr (feature `nostr`)
+    /// A nostr job (`nostr_*` on `Node`) finished.
+    NostrDone {
+        handle: u64,
+        ok: bool,
+        detail: String,
+    },
+    /// A friend invite arrived as a NIP-17 message. `from` is the sender's
+    /// (verified) nostr key; nothing is redeemed until the caller passes the
+    /// ticket to `invite_accept`.
+    NostrInvite { from: [u8; 32], ticket: String },
+    /// A user's verified device list.
+    NostrDevices {
+        handle: u64,
+        user: [u8; 32],
+        devices: Vec<PeerId>,
+    },
 }

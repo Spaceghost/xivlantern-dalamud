@@ -63,6 +63,8 @@ pub(crate) struct Me {
     pub name: String,
     pub status: Status,
     pub note: String,
+    /// This user's nostr public key, once `nostr_keys` has made one.
+    pub nostr: Option<[u8; 32]>,
 }
 
 impl Default for Me {
@@ -71,13 +73,15 @@ impl Default for Me {
             name: String::new(),
             status: Status::Online,
             note: String::new(),
+            nostr: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct FriendDevice {
-    friend_id: i64,
+    pub(super) friend_id: i64,
+    pub(super) nostr: Option<[u8; 32]>,
     name: String,
     online: bool,
     status: Status,
@@ -93,6 +97,7 @@ impl FriendDevice {
     fn new(friend_id: i64, name: String, last_seen_ms: Option<i64>, heartbeat: Duration) -> Self {
         FriendDevice {
             friend_id,
+            nostr: None,
             name,
             online: false,
             status: Status::Invisible,
@@ -120,6 +125,9 @@ pub struct FriendInfo {
     pub last_seen: Option<i64>,
     /// A friend link is currently open (it may still be invisible).
     pub linked: bool,
+    /// The friend's nostr key, set only once a device list signed by that
+    /// key has listed this device.
+    pub nostr: Option<[u8; 32]>,
 }
 
 /// One line of 1:1 history.
@@ -336,6 +344,10 @@ pub(crate) fn load(shared: &Arc<Shared>) -> Result<()> {
             .and_then(Status::from_u32)
             .unwrap_or(Status::Online);
         me.note = store.profile_get("note")?.unwrap_or_default();
+        me.nostr = store
+            .profile_get("nostr_pubkey")?
+            .and_then(|h| data_encoding::HEXLOWER.decode(h.as_bytes()).ok())
+            .and_then(|b| <[u8; 32]>::try_from(b).ok());
     }
     let mut friends = shared.friends.write().unwrap();
     for row in store.friend_devices()? {
@@ -351,10 +363,9 @@ pub(crate) fn load(shared: &Arc<Shared>) -> Result<()> {
                 shared.lookup.add_endpoint_info(addr);
             }
         }
-        friends.insert(
-            id,
-            FriendDevice::new(row.friend_id, row.name, row.last_seen, shared.heartbeat),
-        );
+        let mut device = FriendDevice::new(row.friend_id, row.name, row.last_seen, shared.heartbeat);
+        device.nostr = row.nostr;
+        friends.insert(id, device);
     }
     let mut invites = shared.invites.lock().unwrap();
     for (secret, expires_at) in store.invites_open(now_secs())? {
@@ -867,7 +878,7 @@ impl Node {
             secret,
             name: self.display_name(),
             expires_at,
-            nostr: None,
+            nostr: self.shared.me.read().unwrap().nostr,
         };
         Ok(PreparedInvite {
             text: invite.to_string(),
@@ -929,6 +940,7 @@ impl Node {
                 note: if d.online { d.note.clone() } else { String::new() },
                 last_seen: d.last_seen_ms,
                 linked: links.contains_key(peer),
+                nostr: d.nostr,
             })
             .collect();
         out.sort_by(|a, b| {
@@ -947,7 +959,7 @@ impl Node {
                 out.push(',');
             }
             out.push_str(&format!(
-                "{{\"id\":\"{}\",\"friend\":{},\"name\":{},\"online\":{},\"status\":\"{}\",\"note\":{},\"last_seen\":{},\"linked\":{}}}",
+                "{{\"id\":\"{}\",\"friend\":{},\"name\":{},\"online\":{},\"status\":\"{}\",\"note\":{},\"last_seen\":{},\"linked\":{},\"nostr\":{}}}",
                 data_encoding::HEXLOWER.encode(&f.peer),
                 f.friend_id,
                 json_string(&f.name),
@@ -956,6 +968,7 @@ impl Node {
                 json_string(&f.note),
                 f.last_seen.map_or("null".to_string(), |t| t.to_string()),
                 f.linked,
+                f.nostr.map_or("null".to_string(), |k| format!("\"{}\"", data_encoding::HEXLOWER.encode(&k))),
             ));
         }
         out.push(']');

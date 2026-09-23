@@ -115,6 +115,11 @@ fn two_nodes_meet_talk_and_share_a_file() {
     pump.wait([&a, &b], "alice sees bob", 30, |i, e| {
         i == 0 && matches!(e, Event::PeerJoined { .. })
     });
+    // Each side learns of the neighbour from its own gossip event; Alice's
+    // arriving first says nothing about Bob's.
+    pump.wait([&a, &b], "bob sees alice", 30, |i, e| {
+        i == 1 && matches!(e, Event::PeerJoined { .. })
+    });
 
     // Bob's view of the room must name Alice.
     let peers = b.room_peers(room_b).expect("peers");

@@ -1,6 +1,8 @@
 //! The node: a synchronous handle in front of an async world.
 
 mod friends;
+#[cfg(feature = "nostr")]
+mod nostr;
 
 pub use friends::{FriendInfo, HistoryEntry, PreparedInvite};
 

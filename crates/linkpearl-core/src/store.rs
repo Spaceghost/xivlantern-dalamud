@@ -36,6 +36,8 @@ pub struct DeviceRow {
     /// Last known iroh `EndpointAddr`, postcard encoded by the node layer.
     pub addr: Option<Vec<u8>>,
     pub last_seen: Option<i64>,
+    /// Set only from a verified nostr device list.
+    pub nostr: Option<[u8; 32]>,
 }
 
 /// One line of 1:1 history.
@@ -312,7 +314,7 @@ impl Store {
         let mut stmt = self
             .db
             .prepare(
-                "SELECT d.node_id, d.friend_id, f.name, d.addr, d.last_seen
+                "SELECT d.node_id, d.friend_id, f.name, d.addr, d.last_seen, f.nostr_pubkey
                  FROM friend_devices d JOIN friends f ON f.id = d.friend_id
                  ORDER BY f.name COLLATE NOCASE, d.added_at",
             )
@@ -325,10 +327,67 @@ impl Store {
                     name: r.get(2)?,
                     addr: r.get(3)?,
                     last_seen: r.get(4)?,
+                    nostr: r
+                        .get::<_, Option<Vec<u8>>>(5)?
+                        .and_then(|v| <[u8; 32]>::try_from(v).ok()),
                 })
             })
             .map_err(store_err)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(store_err)
+    }
+
+    /// Record that a *verified* nostr device list names this device. If
+    /// another friend row already has that key, the device moves under it (two
+    /// invites from the same person's two devices become one friend). Returns
+    /// the friend id the device ends up under, or `None` for a non-friend.
+    pub fn friend_bind_nostr(&mut self, node_id: &[u8; 32], pubkey: &[u8; 32]) -> Result<Option<i64>> {
+        let tx = self.db.transaction().map_err(store_err)?;
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT friend_id FROM friend_devices WHERE node_id = ?1",
+                params![node_id.to_vec()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let owner: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM friends WHERE nostr_pubkey = ?1",
+                params![pubkey.to_vec()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let target = match owner {
+            Some(owner) if owner != current => {
+                tx.execute(
+                    "UPDATE friend_devices SET friend_id = ?2 WHERE node_id = ?1",
+                    params![node_id.to_vec(), owner],
+                )
+                .map_err(store_err)?;
+                tx.execute(
+                    "DELETE FROM friends WHERE id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM friend_devices WHERE friend_id = ?1)",
+                    params![current],
+                )
+                .map_err(store_err)?;
+                owner
+            }
+            Some(owner) => owner,
+            None => {
+                tx.execute(
+                    "UPDATE friends SET nostr_pubkey = ?2 WHERE id = ?1",
+                    params![current, pubkey.to_vec()],
+                )
+                .map_err(store_err)?;
+                current
+            }
+        };
+        tx.commit().map_err(store_err)?;
+        Ok(Some(target))
     }
 
     // ------------------------------------------------------------- invites
@@ -631,6 +690,22 @@ mod tests {
         assert!(s.friend_devices().unwrap().is_empty());
         let friends: i64 = s.db.query_row("SELECT count(*) FROM friends", [], |r| r.get(0)).unwrap();
         assert_eq!(friends, 0, "a friend with no devices left is forgotten");
+    }
+
+    #[test]
+    fn a_verified_nostr_key_merges_two_devices_into_one_friend() {
+        let mut s = Store::open(None).unwrap();
+        let (pc, deck, key) = ([1u8; 32], [2u8; 32], [9u8; 32]);
+        let a = s.friend_add(&pc, "Alice", None).unwrap();
+        let b = s.friend_add(&deck, "Alice (Deck)", None).unwrap();
+        assert_ne!(a, b, "two invites, two friends, until nostr says otherwise");
+        assert_eq!(s.friend_bind_nostr(&pc, &key).unwrap(), Some(a));
+        assert_eq!(s.friend_bind_nostr(&deck, &key).unwrap(), Some(a), "moved under the key's friend");
+        let devices = s.friend_devices().unwrap();
+        assert!(devices.iter().all(|d| d.friend_id == a && d.nostr == Some(key)));
+        let friends: i64 = s.db.query_row("SELECT count(*) FROM friends", [], |r| r.get(0)).unwrap();
+        assert_eq!(friends, 1, "the empty friend row is gone");
+        assert_eq!(s.friend_bind_nostr(&[7u8; 32], &key).unwrap(), None, "strangers are not bound");
     }
 
     #[test]
