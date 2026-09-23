@@ -13,6 +13,39 @@ pub struct BlobMeta {
     pub name: String,
 }
 
+/// A friend's presence status. `Invisible` is what a friend who hid themselves
+/// looks like, and what this node sends while hidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum Status {
+    Invisible = 0,
+    #[default]
+    Online = 1,
+    Away = 2,
+    Busy = 3,
+}
+
+impl Status {
+    pub fn from_u32(v: u32) -> Option<Status> {
+        Some(match v {
+            0 => Status::Invisible,
+            1 => Status::Online,
+            2 => Status::Away,
+            3 => Status::Busy,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Invisible => "invisible",
+            Status::Online => "online",
+            Status::Away => "away",
+            Status::Busy => "busy",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     /// The endpoint is bound and the node id is stable.
@@ -71,4 +104,37 @@ pub enum Event {
     Publishing { room: RoomHandle, publishing: bool },
     Error { message: String },
     Log { message: String },
+
+    // ------------------------------------------------------------- friends
+    /// A device became a friend: either we redeemed its invite (`handle` is
+    /// what `invite_accept` returned) or it redeemed ours (`handle` is 0).
+    FriendAdded {
+        handle: u64,
+        peer: PeerId,
+        name: String,
+    },
+    /// Removed by us or by them. Either way the link is gone.
+    FriendRemoved { peer: PeerId },
+    /// An `invite_accept` did not work out.
+    InviteFailed { handle: u64, reason: String },
+    /// A friend came online or changed status or note.
+    FriendOnline {
+        peer: PeerId,
+        status: Status,
+        note: String,
+    },
+    /// A friend went offline, went invisible, or stopped answering.
+    FriendOffline { peer: PeerId },
+    /// A 1:1 text. Raised once per message even if the sender retried.
+    FriendText {
+        peer: PeerId,
+        id: u64,
+        sent_at: i64,
+        text: String,
+    },
+    /// The friend acknowledged a text we sent.
+    FriendDelivered { peer: PeerId, id: u64 },
+    /// A friend invited us to a channel. Nothing is joined until the caller
+    /// passes the ticket to `room_join`.
+    ChannelInvite { peer: PeerId, ticket: String },
 }

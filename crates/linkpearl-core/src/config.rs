@@ -8,7 +8,8 @@ pub enum RelayMode {
     /// The n0 public relays plus hole punching. What almost everyone wants.
     Default,
     /// No relay at all. Direct paths only, so a player behind a symmetric NAT
-    /// will simply fail to connect. Nothing ever touches a third party.
+    /// will simply fail to connect. Nothing ever touches a third party: this
+    /// also turns off n0's DNS/pkarr address lookup.
     Disabled,
     /// A relay the player (or the FC) runs.
     Custom(String),
@@ -37,6 +38,13 @@ pub struct Config {
     /// Accept inbound connections at all. Off means the player is invisible to
     /// strangers; joined rooms still work outbound.
     pub accept_inbound: bool,
+    /// How often friend presence is sent, and the unit of the offline timeout
+    /// (three missed heartbeats) and of the redial backoff.
+    pub heartbeat_ms: u64,
+    /// Bind the endpoint's IPv4 socket to this UDP port instead of a random
+    /// one, so a stored friend address stays valid across restarts on a LAN
+    /// with no relay. `None` lets iroh choose.
+    pub bind_port: Option<u16>,
 }
 
 impl Default for Config {
@@ -48,6 +56,8 @@ impl Default for Config {
             relay: RelayMode::Default,
             event_queue_cap: 4096,
             accept_inbound: true,
+            heartbeat_ms: 15_000,
+            bind_port: None,
         }
     }
 }
@@ -63,5 +73,10 @@ impl Config {
     /// The ALPN used for direct (non-gossip, non-blob) messages.
     pub fn direct_alpn(&self) -> Vec<u8> {
         format!("{}/direct/1", self.app_id).into_bytes()
+    }
+
+    /// The ALPN friend links speak: invites, presence, 1:1 text.
+    pub fn friend_alpn(&self) -> Vec<u8> {
+        format!("{}/friend/1", self.app_id).into_bytes()
     }
 }

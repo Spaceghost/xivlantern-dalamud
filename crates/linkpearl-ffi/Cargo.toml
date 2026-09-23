@@ -15,3 +15,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 linkpearl-core = { path = "../linkpearl-core" }
 data-encoding.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

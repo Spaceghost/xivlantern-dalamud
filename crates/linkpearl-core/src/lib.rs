@@ -1,5 +1,6 @@
-//! Linkpearl: rooms, presence, messages and file transfer over iroh, shaped so a
-//! game plugin can drive it from its frame thread.
+//! Linkpearl: a friend list, presence, 1:1 text, group channels, rooms and file
+//! transfer over iroh, shaped so a game plugin can drive it from its frame
+//! thread. See `docs/DESIGN.md` for what is built and what is only designed.
 //!
 //! The crate is deliberately split in two halves:
 //!
@@ -23,9 +24,9 @@ pub mod topic;
 mod node;
 
 pub use config::{Config, RelayMode};
-pub use event::{BlobMeta, Event, PeerId};
-pub use node::Node;
-pub use ticket::{RoomTicket, Scope};
+pub use event::{BlobMeta, Event, PeerId, Status};
+pub use node::{FriendInfo, HistoryEntry, Node, PreparedInvite};
+pub use ticket::{FriendInvite, RoomTicket, Scope};
 
 /// Largest single room or direct message. Anything bigger belongs in a blob.
 pub const MAX_MESSAGE: usize = 61440;

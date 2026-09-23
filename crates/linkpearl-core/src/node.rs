@@ -1,12 +1,18 @@
 //! The node: a synchronous handle in front of an async world.
 
+mod friends;
+
+pub use friends::{FriendInfo, HistoryEntry, PreparedInvite};
+
 use std::{
     collections::{BTreeSet, HashMap},
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
+    time::Duration,
 };
 
 use iroh::{
@@ -88,6 +94,18 @@ struct Shared {
     next: AtomicU64,
     stats: Stats,
     ev: Mutex<std::sync::mpsc::SyncSender<Event>>,
+    /// Set by `close()`; background loops check it and stop.
+    closed: AtomicBool,
+    lookup: MemoryLookup,
+    friend_alpn: Vec<u8>,
+    heartbeat: Duration,
+    /// Friend devices, loaded from SQLite at open and kept in step with it.
+    friends: RwLock<HashMap<EndpointId, friends::FriendDevice>>,
+    /// The live friend link per device, whichever side dialed.
+    links: Mutex<HashMap<EndpointId, Connection>>,
+    /// Open invites: secret -> expiry (unix seconds, 0 = never).
+    invites: Mutex<HashMap<[u8; 16], i64>>,
+    me: RwLock<friends::Me>,
 }
 
 impl Shared {
@@ -139,6 +157,7 @@ enum Cmd {
         data: Vec<u8>,
     },
     Disconnect(ConnHandle),
+    Friend(friends::FriendCmd),
     BlobAddBytes {
         blob: BlobHandle,
         data: Vec<u8>,
@@ -284,6 +303,7 @@ impl Runner {
                     c.close(0u32.into(), b"bye");
                 }
             }
+            Cmd::Friend(cmd) => friends::handle(&self.shared, cmd),
             Cmd::BlobAddBytes { blob, data } => self.blob_add_bytes(blob, data).await,
             Cmd::BlobAddFile { blob, path } => self.blob_add_file(blob, path).await,
             Cmd::BlobFetch {
@@ -634,21 +654,34 @@ impl Node {
         let (ev_tx, ev_rx) = std::sync::mpsc::sync_channel(config.event_queue_cap.max(16));
         let lookup = MemoryLookup::new();
 
-        let endpoint = rt.block_on(async {
-            let mut builder = Endpoint::builder(presets::N0)
-                .secret_key(secret.clone())
-                .address_lookup(lookup.clone());
-            builder = match &config.relay {
-                RelayMode::Default => builder.relay_mode(iroh::RelayMode::Default),
-                RelayMode::Disabled => builder.relay_mode(iroh::RelayMode::Disabled),
-                RelayMode::Custom(url) => match url.parse::<RelayUrl>() {
-                    Ok(url) => builder.relay_mode(iroh::RelayMode::Custom(url.into())),
-                    Err(_) => builder.relay_mode(iroh::RelayMode::Default),
-                },
-            };
-            builder.bind().await
-        })
-        .map_err(|e| Error::Net(format!("bind: {e}")))?;
+        // With relays disabled the promise is "nothing touches a third party",
+        // so the n0 preset (which publishes to and resolves from n0's DNS) is
+        // not used at all. A custom relay URL that does not parse is an error,
+        // never a silent fallback to somebody else's relay.
+        let mut builder = match &config.relay {
+            RelayMode::Disabled => {
+                Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled)
+            }
+            RelayMode::Default => {
+                Endpoint::builder(presets::N0).relay_mode(iroh::RelayMode::Default)
+            }
+            RelayMode::Custom(url) => {
+                let url: RelayUrl = url.parse().map_err(|_| Error::Arg("relay url did not parse"))?;
+                Endpoint::builder(presets::N0).relay_mode(iroh::RelayMode::Custom(url.into()))
+            }
+        };
+        builder = builder
+            .secret_key(secret.clone())
+            .address_lookup(lookup.clone());
+        if let Some(port) = config.bind_port {
+            builder = builder
+                .clear_ip_transports()
+                .bind_addr(SocketAddr::from(([0, 0, 0, 0], port)))
+                .map_err(|e| Error::Net(format!("bind address: {e}")))?;
+        }
+        let endpoint = rt
+            .block_on(builder.bind())
+            .map_err(|e| Error::Net(format!("bind: {e}")))?;
 
         let node_id: PeerId = *endpoint.id().as_bytes();
 
@@ -664,7 +697,16 @@ impl Node {
             next: AtomicU64::new(1),
             stats: Stats::default(),
             ev: Mutex::new(ev_tx),
+            closed: AtomicBool::new(false),
+            lookup: lookup.clone(),
+            friend_alpn: config.friend_alpn(),
+            heartbeat: Duration::from_millis(config.heartbeat_ms.max(50)),
+            friends: RwLock::new(HashMap::new()),
+            links: Mutex::new(HashMap::new()),
+            invites: Mutex::new(HashMap::new()),
+            me: RwLock::new(friends::Me::default()),
         });
+        friends::load(&shared)?;
 
         // Blob store: on disk beside the database, in memory when there is no
         // database (tests, and a player who asked for nothing to be kept).
@@ -708,6 +750,10 @@ impl Node {
                             shared: Arc::new(SharedRef(shared.clone(), conns.clone())),
                         },
                     )
+                    .accept(
+                        shared.friend_alpn.clone(),
+                        friends::FriendProtocol::new(shared.clone()),
+                    )
                     .spawn()
             } else {
                 Router::builder(endpoint.clone()).spawn()
@@ -729,6 +775,7 @@ impl Node {
             presence: presence.clone(),
         };
         rt.spawn(runner.run(cmd_rx));
+        rt.spawn(friends::heartbeat_loop(shared.clone()));
 
         shared.emit(Event::Ready { node_id });
 
@@ -749,6 +796,7 @@ impl Node {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.shared.closed.store(true, Ordering::SeqCst);
         let _ = self.cmd.send(Cmd::Shutdown);
         if let Ok(mut r) = self._router.lock() {
             if let (Some(router), Some(rt)) = (r.take(), self.rt.as_ref()) {
@@ -857,6 +905,16 @@ impl Node {
                 )
             }
         };
+        self.join(scope, topic, bootstrap, label)
+    }
+
+    fn join(
+        &self,
+        scope: Scope,
+        topic: TopicId,
+        bootstrap: Vec<EndpointAddr>,
+        label: String,
+    ) -> Result<RoomHandle> {
         let room = self.shared.handle();
         self.shared.rooms.write().unwrap().insert(
             room,
@@ -875,6 +933,23 @@ impl Node {
             bootstrap,
         })?;
         Ok(room)
+    }
+
+    /// Create a group channel: a gossip room whose topic comes from a fresh
+    /// random key, so nobody can find it without a ticket. `label` is only for
+    /// display. Share it with `room_ticket` or `channel_invite`.
+    pub fn channel_create(&self, label: &str) -> Result<RoomHandle> {
+        self.check_open()?;
+        let key = data_encoding::HEXLOWER.encode(&friends::random::<32>());
+        let topic = crate::topic::derive(&self.shared.app_id, Scope::Custom, &key);
+        let label = if label.is_empty() { "channel" } else { label };
+        self.join(Scope::Custom, topic, Vec::new(), label.to_string())
+    }
+
+    /// The display label a room was joined or created with.
+    pub fn room_label(&self, room: RoomHandle) -> Result<String> {
+        let rooms = self.shared.rooms.read().unwrap();
+        rooms.get(&room).map(|s| s.label.clone()).ok_or(Error::NotFound)
     }
 
     pub fn room_leave(&self, room: RoomHandle) -> Result<()> {
@@ -1150,7 +1225,7 @@ fn parse_dial_target(text: &str) -> Result<EndpointAddr> {
     }
 }
 
-fn json_string(s: &str) -> String {
+pub(crate) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
