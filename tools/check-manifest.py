@@ -10,7 +10,7 @@ It checks that
   * every field Dalamud's installer needs is present and of the right shape,
   * InternalName matches the assembly name (Dalamud loads <InternalName>.dll),
   * DalamudApiLevel is the level the current Dalamud loads (15),
-  * XivLinkpearl.json's AssemblyVersion and XivLinkpearl.Plugin.csproj's <Version> agree, so the
+  * XivLantern.json's AssemblyVersion and XivLantern.Plugin.csproj's <Version> agree, so the
     listing never advertises a version the zip does not contain,
   * and, with --tag, that the release tag names that same version.
 """
@@ -24,12 +24,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-MANIFEST = ROOT / "src" / "XivLinkpearl.Plugin" / "XivLinkpearl.json"
-PROPS = ROOT / "src" / "XivLinkpearl.Plugin" / "XivLinkpearl.Plugin.csproj"
+MANIFEST = ROOT / "src" / "XivLantern.Plugin" / "XivLantern.json"
+PROPS = ROOT / "src" / "XivLantern.Plugin" / "XivLantern.Plugin.csproj"
 # The API level of the Dalamud that loads plugins today (Dalamud 15.x). A plugin built
 # against a different level is refused by the installer, so this is checked, not guessed.
 API_LEVEL = 15
-ASSEMBLY_NAME = "XivLinkpearl"
+ASSEMBLY_NAME = "XivLantern"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 STRINGS = ("Author", "Name", "InternalName", "Punchline", "Description", "RepoUrl", "ApplicableVersion")
 

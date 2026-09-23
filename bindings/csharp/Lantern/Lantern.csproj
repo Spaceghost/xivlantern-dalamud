@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Plain net10.0, no Dalamud reference: the binding is just P/Invoke over the
+    C ABI, so it builds and tests headless on Linux CI against liblantern.so
+    and ships unchanged to the game against lantern.dll.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Not "Lantern": the native library is lantern.dll, and Windows (and
+         Wine) file names ignore case, so the two would collide in the plugin folder. -->
+    <AssemblyName>Lantern.Interop</AssemblyName>
+    <RootNamespace>Lantern</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Lantern.Tests" />
+  </ItemGroup>
+
+</Project>

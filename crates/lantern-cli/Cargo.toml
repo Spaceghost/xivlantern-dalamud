@@ -1,0 +1,23 @@
+[package]
+name = "lantern-cli"
+description = "A terminal client for lantern-core: befriend, chat, and share a channel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lantern"
+path = "src/main.rs"
+
+[dependencies]
+lantern-core = { path = "../lantern-core" }
+
+[features]
+# /nostr commands: device lists and invites over relays given with --nostr-relay.
+nostr = ["lantern-core/nostr"]
+
+[dev-dependencies]
+tempfile = "3"
