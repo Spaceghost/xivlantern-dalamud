@@ -1,6 +1,14 @@
 # XivLantern
 
-<p align="center"><img src="images/banner.png" alt="XivLantern: a warm paper lantern glowing in the dark" width="730"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/readme/hero-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="images/readme/hero-light.png">
+    <img src="images/readme/hero-dark.png" width="100%" alt="XivLantern: light a lantern for your friends">
+  </picture>
+</p>
+
+<img src="images/icon.png" width="96" height="96" align="right" alt="XivLantern icon">
 
 Lanterns for FINAL FANTASY XIV: friends light a lantern to say they are here.
 A friend list with presence, 1:1 chat and channels, peer to peer over
