@@ -1,4 +1,4 @@
-# Linkpearl design
+# Lantern design
 
 > Status: this is the required direction, not a claim that it works. Each
 > section says whether it is **implemented** (code in this tree, with the test
@@ -9,7 +9,7 @@
 
 The owner's brief: "a sort of friend list and our own comms net with calls and
 video and text — maybe even nostr", for FFXIV players, driven from a Dalamud
-plugin. Linkpearl is the transport and state underneath that plugin. It does not
+plugin. Lantern is the transport and state underneath that plugin. It does not
 talk to the game, read game memory, or send game commands, and it never will
 (see [Threat model](#threat-model-and-privacy)).
 
@@ -21,18 +21,18 @@ talk to the game, read game memory, or send game commands, and it never will
 | Gossip rooms, room presence, blobs, direct connections | implemented (scaffold) | `two_nodes_meet_talk_and_share_a_file` |
 | Friend invites, friend list, presence heartbeat, 1:1 text | implemented | `tests/friends.rs` |
 | Group channels over iroh-gossip, channel invites | implemented | `tests/friends.rs`, `tests/demo.rs` |
-| C ABI for the above, `include/linkpearl.h` in sync | implemented | `tests/abi_friends.rs`, `the_header_matches_the_exports_and_constants` |
-| C# binding for the above | implemented | `Linkpearl.Tests/FriendTests.cs` against `liblinkpearl.so` |
-| CLI demo (`linkpearl`) | implemented | `crates/linkpearl-cli/tests/demo.rs`, `scripts/demo.sh` |
+| C ABI for the above, `include/lantern.h` in sync | implemented | `tests/abi_friends.rs`, `the_header_matches_the_exports_and_constants` |
+| C# binding for the above | implemented | `Lantern.Tests/FriendTests.cs` against `liblantern.so` |
+| CLI demo (`lantern`) | implemented | `crates/lantern-cli/tests/demo.rs`, `scripts/demo.sh` |
 | nostr: device list, invites over relays (feature `nostr`) | implemented | `tests/nostr.rs` against an in-process relay |
 | nostr: NIP-17 offline mailbox for texts, NIP-05 names | design | — |
 | nostr in the C ABI | design | — |
 | Call signalling (feature `calls`) | spike | `tests/calls.rs` |
 | Call media (moq over iroh, sidecar) | design | — |
-| `linkpearl.dll` for `x86_64-pc-windows-gnu` | builds; selftest passes under stock Wine 11 | [WINE.md](WINE.md) |
+| `lantern.dll` for `x86_64-pc-windows-gnu` | builds; selftest passes under stock Wine 11 | [WINE.md](WINE.md) |
 | Blocking, per-peer rate limits, size limits | implemented | `tests/safety.rs` |
-| Author channel (signed announcements), support messages | implemented | `tests/safety.rs`, `crates/linkpearl-cli/tests/demo.rs` |
-| Dalamud plugin (XivLinkpearl) | builds; host tests only | `tests/XivLinkpearl.Core.Tests` |
+| Author channel (signed announcements), support messages | implemented | `tests/safety.rs`, `crates/lantern-cli/tests/demo.rs` |
+| Dalamud plugin (XivLantern) | builds; host tests only | `tests/XivLantern.Core.Tests` |
 | Anything in the game, or in the game's Wine prefix | not observed | — |
 
 This table is kept current by the commits that change it.
@@ -44,25 +44,25 @@ on:
 
 ```sh
 scripts/sync-to-builder.sh
-incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && cargo test --workspace'
-incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && scripts/demo.sh'
+incus exec fedora:iroh-build -- bash -lc 'cd /root/xiv-lantern && cargo test --workspace'
+incus exec fedora:iroh-build -- bash -lc 'cd /root/xiv-lantern && scripts/demo.sh'
 # everything, including nostr and the calls spike:
-incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl && cargo test --workspace \
-    --features linkpearl-core/nostr,linkpearl-core/calls,linkpearl-cli/nostr'
+incus exec fedora:iroh-build -- bash -lc 'cd /root/xiv-lantern && cargo test --workspace \
+    --features lantern-core/nostr,lantern-core/calls,lantern-cli/nostr'
 ```
 
 By hand, two terminals on one machine (relays off, so only direct paths):
 
 ```text
-A$ linkpearl --db alice.sqlite --name Alice --relay off
-B$ linkpearl --db bob.sqlite --name Bob --relay off
-A> /invite                      -> invite lpfriend...
-B> /accept lpfriend...          -> friend added: Alice
+A$ lantern --db alice.sqlite --name Alice --relay off
+B$ lantern --db bob.sqlite --name Bob --relay off
+A> /invite                      -> invite ltfriend...
+B> /accept ltfriend...          -> friend added: Alice
 B> /msg alice hello             A sees: <Bob> hello; B sees: delivered [...]
 A> /status away crafting        B sees: * Alice is away "crafting"
 A> /channel new static
-A> /channel invite Bob          B sees: /channel join lproom...
-B> /channel join lproom...
+A> /channel invite Bob          B sees: /channel join ltroom...
+B> /channel join ltroom...
 A> pull in 5                    B sees: #static <Alice> pull in 5
 ```
 
@@ -81,15 +81,15 @@ without a network.
   stranger (invites are still needed to become a friend).
 * Channels have no history for late joiners, no ordering and no encryption
   beyond each QUIC hop; anyone holding the ticket can read.
-* `lp_stats.relayed_conns` is still always 0 (scaffold); friend links are not
-  counted in `lp_stats` at all.
+* `lt_stats.relayed_conns` is still always 0 (scaffold); friend links are not
+  counted in `lt_stats` at all.
 * nostr and call signalling are not in the C ABI; if a build enables them,
-  their events reach `lp_poll` as `LP_EV_LOG` lines.
+  their events reach `lt_poll` as `LT_EV_LOG` lines.
 * The author channel shows each member's node id (and IP, on direct paths)
   to the neighbours it connects through; that is gossip. The plugin says so.
-* The C# binding is tested against `liblinkpearl.so` on Linux only. The
-  plugin (XivLinkpearl) compiles against Dalamud 15 but has never been
-  loaded by it, and `linkpearl.dll` has never run in the game's process.
+* The C# binding is tested against `liblantern.so` on Linux only. The
+  plugin (XivLantern) compiles against Dalamud 15 but has never been
+  loaded by it, and `lantern.dll` has never run in the game's process.
 
 ## Processes and layers
 
@@ -97,18 +97,18 @@ without a network.
  FFXIV (Wine) ─ Dalamud ─ plugin (C#, ImGui)
                               │ P/Invoke, bindings/csharp
                               ▼
-                        linkpearl.dll  (include/linkpearl.h, linkpearl-ffi)
+                        lantern.dll  (include/lantern.h, lantern-ffi)
                               │
-                        linkpearl-core (tokio, iroh, gossip, blobs, SQLite)
+                        lantern-core (tokio, iroh, gossip, blobs, SQLite)
                               │ QUIC (iroh), hole punching, optional relay
                               ▼
-                friends' linkpearl nodes ── optional nostr relays
+                friends' lantern nodes ── optional nostr relays
                               │
-          (design) linkpearl-media sidecar: moq over iroh, audio/video
+          (design) lantern-media sidecar: moq over iroh, audio/video
 ```
 
-The C ABI is poll-driven: the plugin calls `lp_poll` once per frame and gets
-`lp_event`s. No callback ever crosses into the plugin, for the same reason as
+The C ABI is poll-driven: the plugin calls `lt_poll` once per frame and gets
+`lt_event`s. No callback ever crosses into the plugin, for the same reason as
 in `ghostty-multiagent/docs/IROH.md`: a Rust thread holding a function pointer
 into an unloaded plugin is the crash to design against.
 
@@ -125,9 +125,9 @@ identity; there is deliberately no recovery path at this layer.
 **User identity (implemented behind feature `nostr`).** A person is optionally a nostr keypair
 (secp256k1, NIP-01). It is portable across devices and never required. The
 user key publishes a **device list**: a parameterised-replaceable event (NIP-78
-application data, kind 30078, `d` = `ffxiv-linkpearl/devices`) whose content
+application data, kind 30078, `d` = `xivlantern/devices`) whose content
 lists the user's NodeIds. Each entry carries the device's own ed25519 signature
-over `"linkpearl-device-claim/1" || nostr_pubkey || node_id`, so the list proves
+over `"lantern-device-claim/1" || nostr_pubkey || node_id`, so the list proves
 both directions: the user claims the device, and the device consented. Without
 the device signature anyone could list somebody else's NodeId as theirs.
 
@@ -157,12 +157,12 @@ profile        (key, value)                                           -- name, s
 Without nostr, one invite yields one friend with one device. With nostr, a
 friend is keyed by pubkey and their devices come from the verified device list.
 
-**Implemented** (`crates/linkpearl-core/src/node/friends.rs`, store schema 2).
+**Implemented** (`crates/lantern-core/src/node/friends.rs`, store schema 2).
 
 **Adding a friend is mutual and needs an invite ticket.** There is no directory
 and no "add by name" without nostr.
 
-1. Alice calls `invite_create(ttl)`. The ticket text is `lpfriend` + lowercase
+1. Alice calls `invite_create(ttl)`. The ticket text is `ltfriend` + lowercase
    base32 of a postcard struct: protocol version, Alice's `EndpointAddr`, a
    128-bit random single-use secret, an expiry, Alice's display name, and
    (optionally) her nostr pubkey. The secret is kept in the `invites` table.
@@ -214,7 +214,7 @@ devices is the nostr-era change.
 a random 32-byte key (`Scope::Custom`), so its topic cannot be guessed. Every
 frame is signed by its author and verified on arrival (`proto.rs`), so a relay
 node in the swarm cannot forge or re-attribute. A channel is shared by a room
-ticket (`lproom…`), and between friends by `ChannelInvite { ticket }` over the
+ticket (`ltroom…`), and between friends by `ChannelInvite { ticket }` over the
 friend link, surfaced as an event the UI turns into a "join?" prompt.
 
 What channels do **not** have yet, and should: history for late joiners (a
@@ -227,7 +227,7 @@ Encrypting frames with a key carried in the ticket closes the last one.
 of their devices has been reachable for a while, the text is also sent as a
 NIP-17 private direct message: a kind 14 rumor, sealed (kind 13) and gift-wrapped
 (kind 1059) to each of the friend's DM relays (their kind 10050 list). The
-rumor carries the Linkpearl message id in a tag, so a receiver that later gets
+rumor carries the Lantern message id in a tag, so a receiver that later gets
 the same text over iroh drops the duplicate. Relays see a gift-wrapped blob, its
 size, timing and the recipient's pubkey — not the sender or the content.
 
@@ -247,14 +247,14 @@ device list and invites are **implemented**, the rest is design:
   hint, never trusted — and binding merges one person's devices into one
   friend.
 * **Invites over relays (implemented).** `nostr_send_invite` sends an
-  `lpfriend` ticket to an npub as a NIP-17 DM tagged `["linkpearl","invite/1"]`;
+  `ltfriend` ticket to an npub as a NIP-17 DM tagged `["lantern","invite/1"]`;
   `nostr_check_inbox` raises `NostrInvite` for each one that is not expired,
   not ours, and not from a device that is already a friend. Nothing is
   redeemed automatically. Relays keep gift wraps, so a pending invite is
   raised again on every check until it is accepted or expires.
 * **Offline mailbox.** NIP-17 as above.
 * **Names.** NIP-05 (`name@domain`) resolves to a pubkey, which resolves to
-  devices. Display names in Linkpearl are otherwise self-asserted and only as
+  devices. Display names in Lantern are otherwise self-asserted and only as
   trustworthy as the invite that carried them.
 
 Relays learn who talks to whom at the pubkey level and when. Players who do not
@@ -291,11 +291,11 @@ by winegstreamer and so by whatever GStreamer plugins the host happens to have,
 "least likely to work under Wine", and a software decoder in the game process
 spends the frame budget and turns a codec crash into a game crash. So:
 
-* **In the game (plugin + linkpearl.dll):** call signalling over the friend
+* **In the game (plugin + lantern.dll):** call signalling over the friend
   link (`CallRing`, `CallAnswer`, `CallHangup`, carrying a moq path and the
   host's NodeId), the roster and mute state in the UI, and at most a tiny video
   preview supplied as already-decoded frames.
-* **In a native sidecar (`linkpearl-media`, a Linux process on Linux, a Windows
+* **In a native sidecar (`lantern-media`, a Linux process on Linux, a Windows
   exe on Windows):** moq-native over its own iroh endpoint, `moq-audio`
   capture/playback against PipeWire directly (no Wine audio path), `moq-video`
   with VAAPI/NVDEC, and its own window for video. The sidecar is simply another
@@ -317,13 +317,13 @@ moq is not linked, and none of it is in the C ABI.
 
 1. Build `moq-native` with `iroh` against this workspace's iroh and publish one
    Opus track from one host process to another over a relay-less endpoint.
-2. Same, but with the endpoint shared with `linkpearl-core` (merged ALPNs), so
+2. Same, but with the endpoint shared with `lantern-core` (merged ALPNs), so
    a friend link and a moq session live on one NodeId.
 3. ~~Call signalling on the friend wire behind `calls`, with a two-node test.~~
    Done as the spike above; it still needs the C ABI and a UI decision.
-4. A `linkpearl-media` sidecar with PipeWire capture and playback, paired to a
+4. A `lantern-media` sidecar with PipeWire capture and playback, paired to a
    host node by ticket; measure latency and CPU on the host.
-5. Only then: try `moq-audio` inside `linkpearl.dll` under Wine, in a test
+5. Only then: try `moq-audio` inside `lantern.dll` under Wine, in a test
    prefix, never the game's prefix first.
 6. Video in the sidecar window; decide about in-game preview after measuring.
 
@@ -331,13 +331,13 @@ moq is not linked, and none of it is in the C ABI.
 
 **What must never leave the machine:** game account data. No content id,
 character name, Lodestone id, world, retainer, or chat log is read or sent by
-Linkpearl. The library has no way to read them; the plugin is the only thing
+Lantern. The library has no way to read them; the plugin is the only thing
 that could, and its rule is that anything game-derived is sent only when the
 player typed it or ticked a per-field opt-in. Display names are whatever the
 player types.
 
 **FFXIV terms of service.** Third-party tools are against the ToS; players who
-install Dalamud plugins accept that. Linkpearl keeps the exposure minimal: it
+install Dalamud plugins accept that. Lantern keeps the exposure minimal: it
 never automates a game action, never sends game packets, never bridges in-game
 chat, and never reads another player's data. It is a separate chat and voice
 app that happens to draw inside the game.
@@ -350,7 +350,7 @@ app that happens to draw inside the game.
   frame. Frames are authenticated, not confidential against members.
 * The iroh relay you use (n0's by default, or your own, or none) sees NodeIds
   and traffic timing, never plaintext: QUIC is end to end.
-* With `LP_RELAY_DISABLED` nothing contacts a third party at all, including
+* With `LT_RELAY_DISABLED` nothing contacts a third party at all, including
   n0's DNS/pkarr address lookup; only direct paths work.
 * nostr relays (feature `nostr`, opt-in) see your pubkey, your device list,
   when gift-wrapped messages arrive for you, and their sizes.
@@ -381,9 +381,9 @@ player's plugin config directory.
 
 ## Under Wine
 
-See [WINE.md](WINE.md). On 2026-09-23, `linkpearl.dll` (x86_64-pc-windows-gnu)
+See [WINE.md](WINE.md). On 2026-09-23, `lantern.dll` (x86_64-pc-windows-gnu)
 bound, passed its direct and n0-relay selftest, and interoperated with a native
 node under stock Wine 11.0 in a container. `noq-udp` 1.3.0 already carries both
 of the Wine fixes ghostty-multiagent had to patch into `iroh-quinn-udp`, so
 nothing is vendored. None of this is the game's Wine or the game's prefix;
-`/linkpearl selftest` in game is the proof that is still missing.
+`/lantern selftest` in game is the proof that is still missing.

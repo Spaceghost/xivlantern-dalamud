@@ -1,0 +1,23 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <AssemblyName>XivLantern</AssemblyName>
+    <RootNamespace>XivLantern.Plugin</RootNamespace>
+    <Version>0.1.0.0</Version>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The Windows build of the native library (tools/build-native.sh puts it here). -->
+    <LanternNativeDir Condition="'$(LanternNativeDir)' == ''">$(MSBuildThisFileDirectory)../../../xiv-lantern-build/native/</LanternNativeDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\XivLantern.Core\XivLantern.Core.csproj" />
+    <ProjectReference Include="..\..\bindings\csharp\Lantern\Lantern.csproj" />
+    <Compile Include="..\Shared\IpcContract.cs" Link="Shared\IpcContract.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- lantern.dll travels beside XivLantern.dll and is loaded from the plugin's own folder. -->
+    <None Include="$(LanternNativeDir)lantern.dll" Condition="Exists('$(LanternNativeDir)lantern.dll')"
+          Link="lantern.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <Target Name="WarnWithoutNative" BeforeTargets="Build" Condition="!Exists('$(LanternNativeDir)lantern.dll')">
+    <Warning Text="lantern.dll not found in $(LanternNativeDir): run tools/build-native.sh. The plugin builds, but cannot connect without it." />
+  </Target>
+</Project>

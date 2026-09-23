@@ -1,8 +1,8 @@
 # The author channel
 
-> Status: implemented and host tested (`crates/linkpearl-core/tests/safety.rs`,
-> `crates/linkpearl-cli/tests/demo.rs`). **Not configured in this build**:
-> `src/XivLinkpearl.Core/AuthorIdentity.cs` is empty until the author does the
+> Status: implemented and host tested (`crates/lantern-core/tests/safety.rs`,
+> `crates/lantern-cli/tests/demo.rs`). **Not configured in this build**:
+> `src/XivLantern.Core/AuthorIdentity.cs` is empty until the author does the
 > steps below. Nothing here has run in game.
 
 The author channel is how the mod's author talks to everyone who opts in:
@@ -10,15 +10,15 @@ announcements only the author can post, and a way for players to write back.
 
 ## Keys, and where they live
 
-* **Author key** — an ed25519 key made once with `linkpearl author keygen`.
-  The private half is one file, `~/.config/linkpearl/author.key`, mode 0600,
+* **Author key** — an ed25519 key made once with `lantern author keygen`.
+  The private half is one file, `~/.config/lantern/author.key`, mode 0600,
   on the author's own machine. It is never committed, never copied into a
   container, never shipped. It only signs announcements, offline.
 * **Public key** — printed by `keygen`/`pubkey`, embedded in the plugin as
   `AuthorIdentity.PublicKeyHex`. It names the channel (the gossip topic is
   derived from it) and is what every player's node checks signatures against.
-* **Author node(s)** — an ordinary Linkpearl node the author keeps running
-  (`linkpearl --author-mode <public key>`), with its own node key in its own
+* **Author node(s)** — an ordinary Lantern node the author keeps running
+  (`lantern --author-mode <public key>`), with its own node key in its own
   database. Its NodeId is embedded as `AuthorIdentity.NodeIdHex`: players'
   nodes bootstrap the channel from it and send support messages to it. Losing
   or rotating it only needs a plugin update; the author key does not change.
@@ -29,8 +29,8 @@ characters (a 128-character value would be a secret key).
 ## Setting it up (once, on the author's machine)
 
 ```sh
-linkpearl author keygen                 # prints: public key: <64 hex>
-linkpearl --db ~/.local/share/linkpearl/author-node.sqlite --name "Author" \
+lantern author keygen                 # prints: public key: <64 hex>
+lantern --db ~/.local/share/lantern/author-node.sqlite --name "Author" \
           --author-mode <public key>    # prints the node's ticket; its id is on the "ready" line
 ```
 
@@ -41,11 +41,11 @@ NodeId, so no port forward is needed).
 ## Announcing
 
 ```sh
-linkpearl author sign --seq 1 --title "Linkpearl 0.1" --body "What changed…"
-# -> lpannounce…
+lantern author sign --seq 1 --title "Lantern 0.1" --body "What changed…"
+# -> ltannounce…
 ```
 
-Paste the line into the running author node: `/announce lpannounce…`. `--seq`
+Paste the line into the running author node: `/announce ltannounce…`. `--seq`
 must grow with every announcement; a player's node keeps each number once, so
 re-offers never notify twice. Any node in the channel can carry a signed
 announcement — members hand the latest three to newcomers — but only the

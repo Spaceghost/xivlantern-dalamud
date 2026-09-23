@@ -4,8 +4,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INCUS="${INCUS:-incus}"
-TARGET="${LINKPEARL_BUILDER:-fedora:iroh-build}"
-DEST="${LINKPEARL_BUILD_DIR:-/root/linkpearl}"
+TARGET="${LANTERN_BUILDER:-fedora:iroh-build}"
+DEST="${LANTERN_BUILD_DIR:-/root/xiv-lantern}"
 
 cd "$ROOT"
 tar --exclude=.git --exclude=target --exclude=bin --exclude=obj -cz . \

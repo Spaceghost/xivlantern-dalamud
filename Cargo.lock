@@ -2076,15 +2076,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "linkpearl-cli"
+name = "lantern-cli"
 version = "0.1.0"
 dependencies = [
- "linkpearl-core",
+ "lantern-core",
  "tempfile",
 ]
 
 [[package]]
-name = "linkpearl-core"
+name = "lantern-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2108,12 +2108,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "linkpearl-ffi"
+name = "lantern-ffi"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
  "iroh",
- "linkpearl-core",
+ "lantern-core",
  "tempfile",
 ]
 

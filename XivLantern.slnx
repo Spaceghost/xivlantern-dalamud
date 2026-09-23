@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XivLantern.Core/XivLantern.Core.csproj" />
+    <Project Path="src/XivLantern.Plugin/XivLantern.Plugin.csproj" />
+    <Project Path="bindings/csharp/Lantern/Lantern.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XivLantern.Core.Tests/XivLantern.Core.Tests.csproj" />
+    <Project Path="bindings/csharp/Lantern.Tests/Lantern.Tests.csproj" />
+  </Folder>
+</Solution>

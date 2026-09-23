@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render CHANGELOG.md from changelog.json, the changelog for XivLinkpearl.
+"""Render CHANGELOG.md from changelog.json, the changelog for XivLantern.
 
 changelog.json is the single source of truth: release notes and the installer's
 changelog are written from it, and CHANGELOG.md is generated from it so they can never

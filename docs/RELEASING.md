@@ -1,4 +1,4 @@
-# Releasing XivLinkpearl
+# Releasing XivLantern
 
 One command cuts a release, and it is the same command in every one of these mods.
 
@@ -36,7 +36,7 @@ If the workflow fails, fix it on `master` and re-run that workflow; the tag stay
 
 ## What a release looks like
 
-The title is `XivLinkpearl vX.Y.Z`, or `XivLinkpearl vX.Y.Z-test.N (testing)`. The notes are
+The title is `XivLantern vX.Y.Z`, or `XivLantern vX.Y.Z-test.N (testing)`. The notes are
 generated from the changelog (`changelog.json`): the banner, an honest line about what has not
 been verified in game, the entries grouped as *New*, *Fixed* and *In this build, not yet
 verified in game*, how to install, the checksums, and links to the site and the

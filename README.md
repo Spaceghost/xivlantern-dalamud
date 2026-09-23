@@ -1,16 +1,19 @@
-# XivLinkpearl
+# XivLantern
 
-Your own linkpearl for FINAL FANTASY XIV: a friend list, 1:1 chat and channels,
-peer to peer over [iroh](https://www.iroh.computer/), plus an opt-in channel
-where the mod's author posts signed announcements and players can write back.
-A Dalamud plugin (`/linkpearl`) over a Rust network layer (`linkpearl.dll`).
+<p align="center"><img src="images/banner.png" alt="XivLantern: a warm paper lantern glowing in the dark" width="730"></p>
+
+Lanterns for FINAL FANTASY XIV: friends light a lantern to say they are here.
+A friend list with presence, 1:1 chat and channels, peer to peer over
+[iroh](https://www.iroh.computer/), plus an opt-in channel where the mod's
+author posts signed announcements and players can write back. A Dalamud plugin
+(`/lantern`, or `/xivlantern`) over a Rust network layer (`lantern.dll`).
 
 > **Status: not yet verified in game.** Everything here is tested on a Linux
 > host: the network layer, its C ABI, the C# binding, and the plugin's logic.
 > The Windows build of the network layer passed its selftest and talked to a
 > native node under a stock Wine 11 in a container ([docs/WINE.md](docs/WINE.md)).
 > The plugin compiles against Dalamud 15 but has never been loaded by it.
-> `/linkpearl selftest` in game is the next proof. This is the required
+> `/lantern selftest` in game is the next proof. This is the required
 > direction, not a claim that it works.
 
 ## What it does
@@ -43,19 +46,19 @@ off" contacts no third party at all, and works on a LAN or with open ports.
 A custom relay URL uses a relay you or your FC run.
 [docs/DESIGN.md](docs/DESIGN.md) has the full threat model.
 
-Third-party plugins are against the FFXIV terms of service. Linkpearl never
+Third-party plugins are against the FFXIV terms of service. Lantern never
 automates or sends a game action; it is a separate chat that draws in game.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `crates/linkpearl-core` | iroh endpoint, gossip rooms, friends, author channel, SQLite |
-| `crates/linkpearl-ffi`, `include/linkpearl.h` | the C ABI (`linkpearl.dll`) |
-| `crates/linkpearl-cli` | `linkpearl`, a terminal client, and the author's signing tool |
-| `bindings/csharp` | P/Invoke binding (`Linkpearl.Interop.dll`) |
-| `src/XivLinkpearl.Core` | the plugin's logic, BCL only, host tested |
-| `src/XivLinkpearl.Plugin` | the Dalamud plugin |
+| `crates/lantern-core` | iroh endpoint, gossip rooms, friends, author channel, SQLite |
+| `crates/lantern-ffi`, `include/lantern.h` | the C ABI (`lantern.dll`) |
+| `crates/lantern-cli` | `lantern`, a terminal client, and the author's signing tool |
+| `bindings/csharp` | P/Invoke binding (`Lantern.Interop.dll`) |
+| `src/XivLantern.Core` | the plugin's logic, BCL only, host tested |
+| `src/XivLantern.Plugin` | the Dalamud plugin |
 | `docs/` | design, Wine evidence, IPC, the author channel, releasing |
 
 ## Building
@@ -64,24 +67,24 @@ Never on the machine the game runs on. In the Incus builder:
 
 ```sh
 scripts/sync-to-builder.sh
-incus exec fedora:iroh-build -- bash -lc 'cd /root/linkpearl &&
+incus exec fedora:iroh-build -- bash -lc 'cd /root/xiv-lantern &&
   cargo test --workspace &&
   tools/build-native.sh &&
   tools/fetch-dalamud.sh && export DALAMUD_HOME=$PWD/.dalamud &&
-  dotnet test tests/XivLinkpearl.Core.Tests -c Release &&
-  dotnet build src/XivLinkpearl.Plugin/XivLinkpearl.Plugin.csproj -c Release &&
+  dotnet test tests/XivLantern.Core.Tests -c Release &&
+  dotnet build src/XivLantern.Plugin/XivLantern.Plugin.csproj -c Release &&
   tools/package.sh'
 ```
 
-`tools/package.sh` writes `latest.zip` (XivLinkpearl.dll, XivLinkpearl.Core.dll,
-Linkpearl.Interop.dll, linkpearl.dll, XivLinkpearl.json). For a dev plugin,
-unpack it into a folder and add that folder's `XivLinkpearl.dll` under
+`tools/package.sh` writes `latest.zip` (XivLantern.dll, XivLantern.Core.dll,
+Lantern.Interop.dll, lantern.dll, XivLantern.json). For a dev plugin,
+unpack it into a folder and add that folder's `XivLantern.dll` under
 Dalamud Settings → Experimental → Dev Plugin Locations.
 
 The terminal client is the quickest way to try the network layer:
 
 ```sh
-linkpearl --db alice.sqlite --name Alice --relay off     # /help for commands
+lantern --db alice.sqlite --name Alice --relay off     # /help for commands
 ```
 
 ## Releasing

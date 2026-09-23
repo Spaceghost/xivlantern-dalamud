@@ -1,7 +1,7 @@
 {
   "_comment": "The changelog. tools/changelog.py renders CHANGELOG.md from this file, and release notes and the installer's changelog are written from it. Every user-visible change edits this file in the same commit. Statuses: new/fix (in a release, seen working in game), beta (merged, not yet verified in game), next (still being built, not merged).",
-  "project": "XivLinkpearl",
-  "intro": "Every change to XivLinkpearl a player can see, newest first.\n\nXivLinkpearl has not yet been observed running in the game. Host tests cover the network layer, the C ABI and the plugin's logic, and the Windows build of the network layer has passed its selftest under a stock Wine in a container; nothing below about in-game behaviour has been seen working. Treat it as the design, not as a result — the README says the same thing.",
+  "project": "XivLantern",
+  "intro": "Every change to XivLantern a player can see, newest first.\n\nXivLantern has not yet been observed running in the game. Host tests cover the network layer, the C ABI and the plugin's logic, and the Windows build of the network layer has passed its selftest under a stock Wine in a container; nothing below about in-game behaviour has been seen working. Treat it as the design, not as a result — the README says the same thing.",
   "releases": [
     {
       "version": "next",
@@ -11,7 +11,7 @@
       "items": [
         {
           "status": "beta",
-          "text": "XivLinkpearl, a new mod: `/linkpearl` opens your own linkpearl. Add friends with a one-time invite (make one, send it privately, whoever uses it first becomes your friend; nothing is ever accepted for you), see who is online with a status and a note you type, chat 1:1 with messages that wait and go out when your friend is next online, and make channels you invite friends into. Peer to peer over iroh: there is no Linkpearl server. Host tests cover all of it; none of it has been seen in game."
+          "text": "XivLantern, a new mod: `/lantern` (or `/xivlantern`) opens your lantern. Friends light a lantern to say they are here. Add friends with a one-time invite (make one, send it privately, whoever uses it first becomes your friend; nothing is ever accepted for you), see whose lantern is lit with a status and a note you type, chat 1:1 with messages that wait and go out when your friend is next online, and make channels you invite friends into. Peer to peer over iroh: there is no Lantern server. Host tests cover all of it; none of it has been seen in game."
         },
         {
           "status": "beta",
@@ -31,11 +31,11 @@
         },
         {
           "status": "beta",
-          "text": "`/linkpearl selftest` checks, inside the game's process, that the connection works directly and through a relay, and prints the node id and what it found. With Linkpearl off it uses a throwaway node and closes it. The Windows build passed this under a stock Wine 11 in a container (docs/WINE.md); not yet under the game's Wine."
+          "text": "`/lantern selftest` checks, inside the game's process, that the connection works directly and through a relay, and prints the node id and what it found. With Lantern off it uses a throwaway node and closes it. The Windows build passed this under a stock Wine 11 in a container (docs/WINE.md); not yet under the game's Wine."
         },
         {
           "status": "beta",
-          "text": "For other plugins: `Linkpearl.v1.GetStatus`, `GetFriends`, `SendToFriend`, `OpenChat` and a `MessageReceived` event (docs/IPC.md). Reading and sending are each refused until you allow them in settings."
+          "text": "For other plugins: `XivLantern.v1.GetStatus`, `GetFriends`, `SendToFriend`, `OpenChat` and a `MessageReceived` event (docs/IPC.md). Reading and sending are each refused until you allow them in settings."
         }
       ]
     }
