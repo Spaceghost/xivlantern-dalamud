@@ -76,16 +76,20 @@ without a network.
 
 * Texts are addressed to a device, not a person; fan-out to all of a
   friend's devices is not built.
-* No per-peer rate limits on friend links or rooms; event queues are bounded
-  and count drops, which is the only protection.
+* Rate limits are per peer, not per network: many nodes can still each
+  send up to their own limit. Blocking is per node id; a new id is a new
+  stranger (invites are still needed to become a friend).
 * Channels have no history for late joiners, no ordering and no encryption
   beyond each QUIC hop; anyone holding the ticket can read.
 * `lp_stats.relayed_conns` is still always 0 (scaffold); friend links are not
   counted in `lp_stats` at all.
 * nostr and call signalling are not in the C ABI; if a build enables them,
   their events reach `lp_poll` as `LP_EV_LOG` lines.
-* The C# binding is tested against `liblinkpearl.so` on Linux only; the DLL
-  has never been loaded by Dalamud.
+* The author channel shows each member's node id (and IP, on direct paths)
+  to the neighbours it connects through; that is gossip. The plugin says so.
+* The C# binding is tested against `liblinkpearl.so` on Linux only. The
+  plugin (XivLinkpearl) compiles against Dalamud 15 but has never been
+  loaded by it, and `linkpearl.dll` has never run in the game's process.
 
 ## Processes and layers
 
@@ -361,8 +365,13 @@ app that happens to draw inside the game.
   redeemed it. Keep tickets out of public channels.
 * *Strangers*: cannot open a friend link. `accept_inbound = 0` refuses every
   inbound connection.
-* *A flooding peer*: event queues are bounded and count drops instead of
-  blocking; per-peer rate limits are still missing (design).
+* *A flooding peer*: per-peer token buckets on friend-link frames, room
+  messages and strangers drop the excess before it is stored or shown
+  (`ratelimit.rs`, `tests/safety.rs`), texts and room messages have size
+  limits, event queues are bounded, and any node can be blocked.
+* *Someone posing as the author*: announcements verify against the author
+  public key embedded in the plugin; the private key never ships
+  (`author.rs`, [AUTHOR.md](AUTHOR.md)).
 * *Local theft of the SQLite file*: it holds the device key (and the nostr key
   when used) unencrypted, like an SSH key without a passphrase. OS-level
   protection is the answer for now.
