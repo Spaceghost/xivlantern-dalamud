@@ -2112,6 +2112,7 @@ name = "linkpearl-ffi"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "iroh",
  "linkpearl-core",
  "tempfile",
 ]

@@ -26,11 +26,12 @@ use crate::{
     event::{Event, PeerId, Status},
     store::{now_ms, Store},
     ticket::{FriendInvite, RoomTicket},
-    Error, Result, RoomHandle, MAX_MESSAGE, PROTOCOL_VERSION,
+    Error, Result, RoomHandle, MAX_TEXT, PROTOCOL_VERSION,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_WIRE: usize = MAX_MESSAGE + 4096;
+/// Friend-link frames are texts, presence and tickets; nothing near this.
+const MAX_WIRE: usize = 16 * 1024;
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const MAX_NAME: usize = 64;
 const MAX_NOTE: usize = 256;
@@ -187,6 +188,10 @@ pub(crate) enum Wire {
     CallRing { call: u64, media: String },
     CallAnswer { call: u64, accept: bool },
     CallHangup { call: u64 },
+    /// To the author's node from anyone (author mode accepts it).
+    Support { id: u64, sent_at: i64, body: String },
+    /// From the author's node to somebody who wrote in.
+    SupportReply { id: u64, sent_at: i64, body: String },
 }
 
 pub(crate) fn encode(wire: &Wire) -> Vec<u8> {
@@ -241,6 +246,16 @@ pub(crate) enum FriendCmd {
     Announce,
     Remove { peer: EndpointId },
     Send { peer: EndpointId, wire: Wire },
+    Block { peer: EndpointId, was_friend: bool },
+    Unblock { peer: EndpointId },
+    /// A support message (`reply == false`) or an author's reply.
+    Support {
+        peer: EndpointId,
+        id: u64,
+        sent_at: i64,
+        body: String,
+        reply: bool,
+    },
 }
 
 fn with_store<T>(shared: &Shared, f: impl FnOnce(&mut Store) -> Result<T>) -> Option<T> {
@@ -319,6 +334,35 @@ pub(crate) fn handle(shared: &Arc<Shared>, cmd: FriendCmd) {
                 peer: *peer.as_bytes(),
             });
         }
+        FriendCmd::Block { peer, was_friend } => {
+            with_store(shared, |s| {
+                s.block(peer.as_bytes())?;
+                s.friend_remove_device(peer.as_bytes()).map(|_| ())
+            });
+            // Silently: a blocked player is not told.
+            let conn = shared.links.lock().unwrap().remove(&peer);
+            if let Some(conn) = conn {
+                conn.close(1u32.into(), b"bye");
+            }
+            if was_friend {
+                shared.emit(Event::FriendRemoved {
+                    peer: *peer.as_bytes(),
+                });
+            }
+        }
+        FriendCmd::Unblock { peer } => {
+            with_store(shared, |s| s.unblock(peer.as_bytes()).map(|_| ()));
+        }
+        FriendCmd::Support {
+            peer,
+            id,
+            sent_at,
+            body,
+            reply,
+        } => {
+            with_store(shared, |s| s.message_out(peer.as_bytes(), id, sent_at, &body));
+            tokio::spawn(send_support(shared.clone(), peer, id, sent_at, body, reply));
+        }
         FriendCmd::Send { peer, wire } => match link(shared, &peer) {
             Some(conn) => {
                 let shared = shared.clone();
@@ -372,6 +416,12 @@ pub(crate) fn load(shared: &Arc<Shared>) -> Result<()> {
         let mut device = FriendDevice::new(row.friend_id, row.name, row.last_seen, shared.heartbeat);
         device.nostr = row.nostr;
         friends.insert(id, device);
+    }
+    let mut blocked = shared.blocked.write().unwrap();
+    for node in store.blocked()? {
+        if let Ok(id) = EndpointId::from_bytes(&node) {
+            blocked.insert(id);
+        }
     }
     let mut invites = shared.invites.lock().unwrap();
     for (secret, expires_at) in store.invites_open(now_secs())? {
@@ -506,6 +556,9 @@ async fn run_link(shared: Arc<Shared>, conn: Connection) {
 
     while let Ok(frame) = recv(&shared, &conn).await {
         let Some(wire) = frame else { continue };
+        if !shared.allow(&peer, "friend") {
+            continue;
+        }
         if !on_frame(&shared, &conn, peer, wire).await {
             break;
         }
@@ -563,6 +616,12 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
             heard(shared, peer, status, note);
         }
         Wire::Heartbeat { status, note } => heard(shared, peer, status, note),
+        Wire::Text { id, body, .. } if body.len() > MAX_TEXT => {
+            // Our own clients never send this; ack so it is not retried
+            // forever, and drop it.
+            shared.log(format!("dropped an oversized text ({} bytes)", body.len()));
+            let _ = send(shared, conn, &Wire::Ack { id }).await;
+        }
         Wire::Text { id, sent_at, body } => {
             let fresh = with_store(shared, |s| s.message_in(&peer_bytes, id, sent_at, &body));
             if fresh == Some(true) {
@@ -608,6 +667,9 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
         }
         #[cfg(not(feature = "calls"))]
         Wire::CallRing { .. } | Wire::CallAnswer { .. } | Wire::CallHangup { .. } => {}
+        Wire::Support { .. } | Wire::SupportReply { .. } => {
+            support_frame(shared, conn, peer, wire).await;
+        }
     }
     true
 }
@@ -665,14 +727,14 @@ async fn accept_invite(shared: Arc<Shared>, handle: u64, invite: FriendInvite) {
 
 /// A stranger presenting an invite. `true` when it was good and the link
 /// should run.
-async fn redeem(shared: &Arc<Shared>, conn: &Connection) -> bool {
+async fn redeem(
+    shared: &Arc<Shared>,
+    conn: &Connection,
+    secret: [u8; 16],
+    name: String,
+    addr: EndpointAddr,
+) -> bool {
     let peer = conn.remote_id();
-    let Ok(Ok(Some(Wire::Redeem { secret, name, addr }))) =
-        timeout(HANDSHAKE_TIMEOUT, recv(shared, conn)).await
-    else {
-        conn.close(1u32.into(), b"not a friend");
-        return false;
-    };
     let valid = {
         let mut invites = shared.invites.lock().unwrap();
         match invites.remove(&secret) {
@@ -727,10 +789,138 @@ impl ProtocolHandler for FriendProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
         let shared = self.shared.clone();
         let peer = conn.remote_id();
-        if is_friend(&shared, &peer) || redeem(&shared, &conn).await {
+        if shared.is_blocked(&peer) {
+            conn.close(1u32.into(), b"no");
+        } else if is_friend(&shared, &peer) {
             run_link(shared, conn).await;
+        } else {
+            stranger(shared, conn).await;
         }
         Ok(())
+    }
+}
+
+/// A node that is not a friend gets one frame: an invite redemption, or (to
+/// an author node, or from a support contact) a support message.
+async fn stranger(shared: Arc<Shared>, conn: Connection) {
+    let peer = conn.remote_id();
+    if !shared.allow(&peer, "stranger") {
+        conn.close(1u32.into(), b"slow down");
+        return;
+    }
+    match timeout(HANDSHAKE_TIMEOUT, recv(&shared, &conn)).await {
+        Ok(Ok(Some(Wire::Redeem { secret, name, addr }))) => {
+            if redeem(&shared, &conn, secret, name, addr).await {
+                run_link(shared, conn).await;
+            }
+        }
+        Ok(Ok(Some(first @ (Wire::Support { .. } | Wire::SupportReply { .. })))) => {
+            // A short session: a few support frames at most, then close.
+            let mut next = Some(first);
+            for _ in 0..4 {
+                let Some(wire) = next.take() else { break };
+                if !support_frame(&shared, &conn, peer, wire).await {
+                    break;
+                }
+                next = match timeout(Duration::from_secs(5), recv(&shared, &conn)).await {
+                    Ok(Ok(Some(w))) if shared.allow(&peer, "stranger") => Some(w),
+                    _ => None,
+                };
+            }
+            // The sender closes once it has its ack.
+            let _ = timeout(Duration::from_secs(5), conn.closed()).await;
+        }
+        _ => conn.close(1u32.into(), b"not a friend"),
+    }
+}
+
+/// Handle a support message (author mode) or a reply (from a support
+/// contact). `false` when this node does not take that frame from `peer`.
+async fn support_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wire: Wire) -> bool {
+    let peer_bytes = *peer.as_bytes();
+    let (id, sent_at, body, reply) = match wire {
+        Wire::Support { id, sent_at, body } if shared.accept_support => (id, sent_at, body, false),
+        Wire::SupportReply { id, sent_at, body }
+            if shared.support_contacts.read().unwrap().contains(&peer) =>
+        {
+            (id, sent_at, body, true)
+        }
+        _ => return false,
+    };
+    if body.len() > MAX_TEXT || body.is_empty() {
+        let _ = send(shared, conn, &Wire::Ack { id }).await;
+        return true;
+    }
+    let fresh = with_store(shared, |s| s.message_in(&peer_bytes, id, sent_at, &body));
+    if fresh == Some(true) {
+        shared.emit(if reply {
+            Event::SupportReply {
+                peer: peer_bytes,
+                id,
+                sent_at,
+                text: body,
+            }
+        } else {
+            Event::SupportMessage {
+                peer: peer_bytes,
+                id,
+                sent_at,
+                text: body,
+            }
+        });
+    }
+    if fresh.is_some() {
+        let _ = send(shared, conn, &Wire::Ack { id }).await;
+    }
+    true
+}
+
+async fn send_support(shared: Arc<Shared>, peer: EndpointId, id: u64, sent_at: i64, body: String, reply: bool) {
+    let peer_bytes = *peer.as_bytes();
+    let fail = |reason: String| {
+        shared.emit(Event::SupportFailed {
+            peer: peer_bytes,
+            id,
+            reason,
+        })
+    };
+    let conn = match timeout(
+        HANDSHAKE_TIMEOUT,
+        shared.endpoint.connect(EndpointAddr::from(peer), &shared.friend_alpn),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return fail(format!("could not reach them: {e}")),
+        Err(_) => return fail("timed out reaching them".into()),
+    };
+    let wire = if reply {
+        Wire::SupportReply { id, sent_at, body }
+    } else {
+        Wire::Support { id, sent_at, body }
+    };
+    if let Err(e) = send(&shared, &conn, &wire).await {
+        conn.close(0u32.into(), b"ok");
+        return fail(format!("send failed: {e}"));
+    }
+    let acked = timeout(HANDSHAKE_TIMEOUT, async {
+        loop {
+            match recv(&shared, &conn).await {
+                Ok(Some(Wire::Ack { id: got })) if got == id => return true,
+                Ok(_) => continue,
+                Err(()) => return false,
+            }
+        }
+    })
+    .await;
+    conn.close(0u32.into(), b"ok");
+    match acked {
+        Ok(true) => {
+            with_store(&shared, |s| s.message_delivered(&peer_bytes, id));
+            shared.emit(Event::SupportDelivered { peer: peer_bytes, id });
+        }
+        Ok(false) => fail("they closed without taking it (not accepting messages)".into()),
+        Err(_) => fail("no answer".into()),
     }
 }
 
@@ -823,6 +1013,15 @@ async fn dial_friend(shared: Arc<Shared>, peer: EndpointId) {
 }
 
 // -------------------------------------------------------------- Node API
+
+fn message_id() -> u64 {
+    loop {
+        let id = u64::from_le_bytes(random::<8>());
+        if id != 0 {
+            return id;
+        }
+    }
+}
 
 fn endpoint_id(peer: &PeerId) -> Result<EndpointId> {
     EndpointId::from_bytes(peer).map_err(|_| Error::Arg("not a node id"))
@@ -930,6 +1129,9 @@ impl Node {
         if invite.addr.id == self.shared.endpoint.id() {
             return Err(Error::Arg("that invite is your own"));
         }
+        if self.shared.is_blocked(&invite.addr.id) {
+            return Err(Error::Arg("you blocked the player who made that invite"));
+        }
         if invite.is_expired(now_secs()) {
             return Err(Error::Arg("that invite has expired"));
         }
@@ -997,21 +1199,106 @@ impl Node {
         if text.is_empty() {
             return Err(Error::Arg("empty message"));
         }
-        if text.len() > MAX_MESSAGE {
+        if text.len() > MAX_TEXT {
             return Err(Error::TooLarge);
         }
         let peer = self.require_friend(peer)?;
-        let id = loop {
-            let id = u64::from_le_bytes(random::<8>());
-            if id != 0 {
-                break id;
-            }
-        };
+        let id = message_id();
         self.friend_cmd(FriendCmd::Text {
             peer,
             id,
             sent_at: now_ms(),
             body: text.to_string(),
+        })?;
+        Ok(id)
+    }
+
+    // ------------------------------------------------------------ safety
+
+    /// Block a node: it is dropped from the friend list (without telling it),
+    /// its link is closed, and from now on its connections, room messages and
+    /// invites are refused. Works on anybody, friend or not. Persisted.
+    pub fn block(&self, peer: &PeerId) -> Result<()> {
+        self.check_open()?;
+        let id = endpoint_id(peer)?;
+        if id == self.shared.endpoint.id() {
+            return Err(Error::Arg("that is you"));
+        }
+        self.shared.blocked.write().unwrap().insert(id);
+        let was_friend = self.shared.friends.write().unwrap().remove(&id).is_some();
+        self.friend_cmd(FriendCmd::Block { peer: id, was_friend })
+    }
+
+    pub fn unblock(&self, peer: &PeerId) -> Result<()> {
+        self.check_open()?;
+        let id = endpoint_id(peer)?;
+        if !self.shared.blocked.write().unwrap().remove(&id) {
+            return Err(Error::NotFound);
+        }
+        self.friend_cmd(FriendCmd::Unblock { peer: id })
+    }
+
+    pub fn blocked(&self) -> Vec<PeerId> {
+        let mut out: Vec<PeerId> = self.shared.blocked.read().unwrap().iter().map(|p| *p.as_bytes()).collect();
+        out.sort();
+        out
+    }
+
+    pub fn blocked_json(&self) -> String {
+        let items: Vec<String> = self
+            .blocked()
+            .iter()
+            .map(|p| format!("\"{}\"", data_encoding::HEXLOWER.encode(p)))
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    // ----------------------------------------------------------- support
+
+    /// The nodes whose replies to support messages are accepted: the author's
+    /// nodes, as the plugin knows them. Replaces the previous set.
+    pub fn set_support_contacts(&self, peers: &[PeerId]) {
+        let set = peers.iter().filter_map(|p| EndpointId::from_bytes(p).ok()).collect();
+        *self.shared.support_contacts.write().unwrap() = set;
+    }
+
+    /// Write to a support contact (the author). Returns the message id;
+    /// `SupportDelivered` or `SupportFailed` follows. Not queued: a failure is
+    /// final and the player can try again.
+    pub fn support_send(&self, peer: &PeerId, text: &str) -> Result<u64> {
+        let id = endpoint_id(peer)?;
+        if !self.shared.support_contacts.read().unwrap().contains(&id) {
+            return Err(Error::NotFound);
+        }
+        self.support(id, text, false)
+    }
+
+    /// Author mode: answer somebody who wrote in.
+    pub fn support_reply(&self, peer: &PeerId, text: &str) -> Result<u64> {
+        if !self.shared.accept_support {
+            return Err(Error::State("only an author node replies to support messages"));
+        }
+        self.support(endpoint_id(peer)?, text, true)
+    }
+
+    fn support(&self, peer: EndpointId, text: &str, reply: bool) -> Result<u64> {
+        self.check_open()?;
+        if text.trim().is_empty() {
+            return Err(Error::Arg("empty message"));
+        }
+        if text.len() > MAX_TEXT {
+            return Err(Error::TooLarge);
+        }
+        if self.shared.is_blocked(&peer) {
+            return Err(Error::Arg("you blocked them"));
+        }
+        let id = message_id();
+        self.friend_cmd(FriendCmd::Support {
+            peer,
+            id,
+            sent_at: now_ms(),
+            body: text.to_string(),
+            reply,
         })?;
         Ok(id)
     }
@@ -1127,6 +1414,16 @@ mod tests {
                 accept: true,
             },
             Wire::CallHangup { call: 1 },
+            Wire::Support {
+                id: 3,
+                sent_at: 4,
+                body: "help".into(),
+            },
+            Wire::SupportReply {
+                id: 3,
+                sent_at: 5,
+                body: "on it".into(),
+            },
         ];
         for f in frames {
             assert_eq!(decode(&encode(&f)), Some(f));

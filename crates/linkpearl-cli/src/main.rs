@@ -9,6 +9,8 @@
 //! Type `/help` for commands. Lines that do not start with `/` go to the
 //! current channel.
 
+mod author;
+
 use std::{
     collections::HashMap,
     io::BufRead,
@@ -35,6 +37,13 @@ commands:
   /channel ticket             print the current channel's ticket
   /channels                   list joined channels
   /say <text>                 send to the current channel (or just type)
+  /block <friend|id>  /unblock <id>  /blocked
+  /selftest                   is this node reachable, directly and via relay?
+  /hint <lpnode...>           remember where a node is (relays off / LAN)
+  /announcements              the author channel's verified announcements
+  /support <text>             write to the author (needs --author and --author-node)
+  /announce <lpannounce...>   author mode: publish a signed announcement
+  /reply <id-prefix> <text>   author mode: answer a support message
   /nostr id|import <nsec>|publish|devices <npub>|invite <npub> [ttl]|inbox
                               (built with --features nostr; needs --nostr-relay)
   /quit";
@@ -46,11 +55,17 @@ struct Args {
     port: Option<u16>,
     heartbeat_ms: Option<u64>,
     nostr_relays: Vec<String>,
+    /// The author key whose channel to join (64 hex).
+    author: Option<[u8; 32]>,
+    /// The author's always-on nodes (64 hex each).
+    author_nodes: Vec<PeerId>,
+    /// This node is the author's: accept support messages.
+    author_mode: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: linkpearl [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N] [--nostr-relay WS_URL]...\n\n{HELP}"
+        "usage: linkpearl [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N]\n                 [--author KEYHEX [--author-node NODEID]... | --author-mode KEYHEX] [--nostr-relay WS_URL]...\n       linkpearl author keygen|pubkey|sign ...   (offline; see linkpearl author)\n\n{HELP}"
     );
     std::process::exit(2)
 }
@@ -63,7 +78,14 @@ fn parse_args() -> Args {
         port: None,
         heartbeat_ms: None,
         nostr_relays: Vec::new(),
+        author: None,
+        author_nodes: Vec::new(),
+        author_mode: false,
     };
+    let parse_key = |v: String| linkpearl_core::author::parse_author(&v).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        usage()
+    });
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| usage());
@@ -80,6 +102,12 @@ fn parse_args() -> Args {
             "--port" => args.port = Some(value().parse().unwrap_or_else(|_| usage())),
             "--heartbeat-ms" => args.heartbeat_ms = Some(value().parse().unwrap_or_else(|_| usage())),
             "--nostr-relay" => args.nostr_relays.push(value()),
+            "--author" => args.author = Some(parse_key(value())),
+            "--author-node" => args.author_nodes.push(parse_key(value())),
+            "--author-mode" => {
+                args.author = Some(parse_key(value()));
+                args.author_mode = true;
+            }
             "-h" | "--help" => usage(),
             _ => usage(),
         }
@@ -105,6 +133,11 @@ struct Cli {
     running: bool,
     #[cfg_attr(not(feature = "nostr"), allow(dead_code))]
     nostr_relays: Vec<String>,
+    author: Option<[u8; 32]>,
+    author_room: Option<RoomHandle>,
+    author_nodes: Vec<PeerId>,
+    /// Author mode: who wrote in, for /reply.
+    writers: Vec<PeerId>,
 }
 
 impl Cli {
@@ -260,6 +293,66 @@ impl Cli {
                 }
             }
             "/say" => return self.say(rest),
+            "/block" => {
+                let peer = self.friend(rest).or_else(|_| parse_id(rest))?;
+                self.node.block(&peer).map_err(e)?;
+                println!("blocked {}", self.name_of(&peer));
+            }
+            "/unblock" => {
+                let peer = parse_id(rest)
+                    .or_else(|_| {
+                        let hits: Vec<_> = self.node.blocked().into_iter().filter(|p| hex(p).starts_with(rest)).collect();
+                        if hits.len() == 1 { Ok(hits[0]) } else { Err("give the id (see /blocked)".to_string()) }
+                    })?;
+                self.node.unblock(&peer).map_err(e)?;
+                println!("unblocked {}", short(&peer));
+            }
+            "/blocked" => {
+                let list = self.node.blocked();
+                if list.is_empty() {
+                    println!("nobody is blocked");
+                }
+                for p in list {
+                    println!("  {}", hex(&p));
+                }
+            }
+            "/selftest" => {
+                let h = self.node.selftest().map_err(e)?;
+                println!("selftest #{h} running (up to ~40 s)...");
+            }
+            "/hint" => {
+                self.node.add_address_hint(rest).map_err(e)?;
+                println!("noted");
+            }
+            "/announcements" => {
+                let author = self.author.ok_or("no --author given")?;
+                let list = self.node.announcements(&author, 20).map_err(e)?;
+                if list.is_empty() {
+                    println!("no announcements yet");
+                }
+                for a in list {
+                    println!("  [#{}] {} — {}", a.seq, a.title, a.body);
+                }
+            }
+            "/announce" => {
+                let room = self.author_room.ok_or("not in an author channel (--author-mode KEY)")?;
+                let seq = self.node.author_announce(room, rest).map_err(e)?;
+                println!("announcement #{seq} published");
+            }
+            "/support" => {
+                let to = *self.author_nodes.first().ok_or("no --author-node given")?;
+                let id = self.node.support_send(&to, rest).map_err(e)?;
+                println!("-> author [{id:016x}] {rest}");
+            }
+            "/reply" => {
+                let (who, text) = rest.split_once(char::is_whitespace).ok_or("usage: /reply <id-prefix> <text>")?;
+                let hits: Vec<PeerId> = self.writers.iter().filter(|p| hex(p).starts_with(who)).copied().collect();
+                let [peer] = hits[..] else {
+                    return Err("no single writer matches that prefix".into());
+                };
+                let id = self.node.support_reply(&peer, text.trim()).map_err(e)?;
+                println!("-> {} [{id:016x}] {}", short(&peer), text.trim());
+            }
             "/nostr" => return self.nostr(rest),
             _ => return Err(format!("unknown command {cmd}; /help")),
         }
@@ -394,6 +487,25 @@ impl Cli {
                 String::from_utf8_lossy(&data)
             ),
             Event::Error { message } => println!("error: {message}"),
+            Event::RateLimited { peer, what } => {
+                println!("rate limit: dropping {what} frames from {}", self.name_of(&peer))
+            }
+            Event::Announcement { seq, title, body, .. } => {
+                println!("[author, verified] #{seq} {title}");
+                if !body.is_empty() {
+                    println!("  {body}");
+                }
+            }
+            Event::SupportMessage { peer, text, .. } => {
+                if !self.writers.contains(&peer) {
+                    self.writers.push(peer);
+                }
+                println!("[support from {}] {text}   (/reply {} ...)", short(&peer), short(&peer));
+            }
+            Event::SupportReply { text, .. } => println!("[author] {text}"),
+            Event::SupportDelivered { id, .. } => println!("delivered [{id:016x}] to the author"),
+            Event::SupportFailed { id, reason, .. } => println!("not delivered [{id:016x}]: {reason}"),
+            Event::SelfTest { handle, report } => println!("selftest #{handle}: {report}"),
             Event::NostrDone { handle, ok, detail } => {
                 println!("nostr #{handle} {}: {detail}", if ok { "done" } else { "failed" })
             }
@@ -414,12 +526,21 @@ impl Cli {
     }
 }
 
+fn parse_id(text: &str) -> Result<PeerId, String> {
+    linkpearl_core::author::parse_author(text).map_err(|_| "not a 64-character node id".to_string())
+}
+
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(String::as_str) == Some("author") {
+        std::process::exit(author::run(&raw[1..]));
+    }
     let args = parse_args();
     let mut config = Config {
         db_path: Some(args.db.clone().into()),
         relay: args.relay,
         bind_port: args.port,
+        accept_support: args.author_mode,
         ..Config::default()
     };
     if let Some(ms) = args.heartbeat_ms {
@@ -444,7 +565,24 @@ fn main() {
         current: None,
         running: true,
         nostr_relays: args.nostr_relays,
+        author: args.author,
+        author_room: None,
+        author_nodes: args.author_nodes.clone(),
+        writers: Vec::new(),
     };
+    if let Some(key) = args.author {
+        cli.node.set_support_contacts(&args.author_nodes);
+        match cli.node.author_join(&key, &args.author_nodes) {
+            Ok(room) => {
+                cli.author_room = Some(room);
+                if args.author_mode {
+                    println!("author mode: support messages accepted; this node's ticket:");
+                    println!("{}", cli.node.node_ticket());
+                }
+            }
+            Err(e) => println!("author channel: {e}"),
+        }
+    }
     cli.refresh_names();
 
     let (tx, rx) = mpsc::channel::<Option<String>>();

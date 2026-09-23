@@ -281,8 +281,8 @@ fn oversized_messages_are_refused_before_they_hit_the_wire() {
     let dir = tempfile::tempdir().expect("tempdir");
     let n = node("big", dir.path());
     let room = n.room_join(Scope::Custom, "big", None).unwrap();
-    let too_big = vec![0u8; linkpearl_core::MAX_MESSAGE + 1];
+    let too_big = vec![0u8; linkpearl_core::MAX_ROOM_MESSAGE + 1];
     assert!(n.room_send(room, &too_big).is_err());
-    assert!(n.room_send(room, &too_big[..linkpearl_core::MAX_MESSAGE]).is_ok());
+    assert!(n.room_send(room, &too_big[..linkpearl_core::MAX_ROOM_MESSAGE]).is_ok());
     n.close();
 }

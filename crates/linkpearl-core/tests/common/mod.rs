@@ -30,7 +30,7 @@ pub fn node(name: &str, dir: &Path) -> Node {
 /// first event its predicate matches and leaves everything else for later
 /// waits, so an event that arrives before anyone asks for it is not lost.
 pub struct Pump {
-    log: Vec<(usize, Event)>,
+    pub log: Vec<(usize, Event)>,
     pending: Vec<VecDeque<Event>>,
 }
 

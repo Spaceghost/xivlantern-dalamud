@@ -220,7 +220,8 @@ public sealed unsafe class LinkpearlNode : IDisposable
             stats.DirectConns,
             stats.RelayedConns,
             stats.PublishingRooms,
-            stats.EventsDropped);
+            stats.EventsDropped,
+            stats.RateLimited);
     }
 
     /// <summary>Is this node serving anything into the room right now? The UI
@@ -437,6 +438,126 @@ public sealed unsafe class LinkpearlNode : IDisposable
         {
             Check(Native.ChannelInvite(Handle, p, room), "channel invite");
         }
+    }
+
+    // --------------------------------------------------------------- safety
+
+    /// <summary>Block a node: silently dropped from friends, and refused from then on. Persisted.</summary>
+    public void Block(byte[] peer)
+    {
+        CheckPeer(peer);
+        fixed (byte* p = peer)
+        {
+            Check(Native.Block(Handle, p), "block");
+        }
+    }
+
+    /// <summary>False when the node was not blocked.</summary>
+    public bool Unblock(byte[] peer)
+    {
+        CheckPeer(peer);
+        int status;
+        fixed (byte* p = peer)
+        {
+            status = Native.Unblock(Handle, p);
+        }
+
+        if (status == -4)
+        {
+            return false;
+        }
+
+        Check(status, "unblock");
+        return true;
+    }
+
+    /// <summary>JSON array of hex node ids.</summary>
+    public string BlockedJson() =>
+        Text((b, len, need) => Native.BlockedList(Handle, b, len, need), "blocked");
+
+    /// <summary>Remember where a node is (an lpnode… ticket), for relay-off use.</summary>
+    public void AddressHint(string nodeTicket)
+    {
+        using var buf = new Utf8Buffer(nodeTicket);
+        Check(Native.AddressHint(Handle, (byte*)buf.Pointer), "address hint");
+    }
+
+    // ------------------------------------------------------ author channel
+
+    /// <summary>Join the author channel of an ed25519 author key, bootstrapped by the author's nodes.</summary>
+    public ulong AuthorJoin(byte[] authorKey, IReadOnlyList<byte[]> bootstrap)
+    {
+        CheckPeer(authorKey);
+        byte[] flat = Flatten(bootstrap);
+        ulong room;
+        fixed (byte* a = authorKey)
+        fixed (byte* b = flat)
+        {
+            Check(Native.AuthorJoin(Handle, a, flat.Length == 0 ? null : b, (uint)bootstrap.Count, &room), "author join");
+        }
+
+        return room;
+    }
+
+    /// <summary>Kept announcements, newest first, as JSON. Reads SQLite: keep it out of Draw.</summary>
+    public string AnnouncementsJson(byte[] authorKey, uint limit = 20)
+    {
+        CheckPeer(authorKey);
+        return Text(
+            (b, len, need) =>
+            {
+                fixed (byte* a = authorKey)
+                {
+                    return Native.Announcements(Handle, a, limit, b, len, need);
+                }
+            },
+            "announcements");
+    }
+
+    public void SetSupportContacts(IReadOnlyList<byte[]> peers)
+    {
+        byte[] flat = Flatten(peers);
+        fixed (byte* p = flat)
+        {
+            Check(Native.SupportContactsSet(Handle, flat.Length == 0 ? null : p, (uint)peers.Count), "support contacts");
+        }
+    }
+
+    /// <summary>Write to the author. SupportDelivered or SupportFailed follows; nothing is retried.</summary>
+    public ulong SupportSend(byte[] peer, string text)
+    {
+        CheckPeer(peer);
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        ulong id;
+        fixed (byte* p = peer)
+        fixed (byte* t = bytes)
+        {
+            Check(Native.SupportSend(Handle, p, t, (uint)bytes.Length, &id), "support send");
+        }
+
+        return id;
+    }
+
+    // ------------------------------------------------------------ selftest
+
+    /// <summary>Start a reachability test; a SelfTest event with this handle carries the JSON report.</summary>
+    public ulong SelfTest()
+    {
+        ulong handle;
+        Check(Native.SelfTest(Handle, &handle), "selftest");
+        return handle;
+    }
+
+    private static byte[] Flatten(IReadOnlyList<byte[]> peers)
+    {
+        var flat = new byte[peers.Count * Native.NodeIdLen];
+        for (int i = 0; i < peers.Count; i++)
+        {
+            CheckPeer(peers[i]);
+            peers[i].CopyTo(flat, i * Native.NodeIdLen);
+        }
+
+        return flat;
     }
 
     private static void CheckPeer(byte[] peer)

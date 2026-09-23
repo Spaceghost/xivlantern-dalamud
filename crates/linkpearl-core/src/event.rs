@@ -156,6 +156,48 @@ pub enum Event {
         devices: Vec<PeerId>,
     },
 
+    // ------------------------------------------------------------- safety
+    /// Frames from `peer` are being dropped by a rate limit (`what` is
+    /// "friend", "room" or "stranger"). Raised at most every 30 s per peer.
+    RateLimited { peer: PeerId, what: String },
+
+    // ------------------------------------------------------ author channel
+    /// A verified announcement, raised once per (author, seq).
+    Announcement {
+        room: RoomHandle,
+        author: [u8; 32],
+        seq: u64,
+        issued_at: i64,
+        title: String,
+        body: String,
+    },
+    /// Author mode: somebody who is not necessarily a friend wrote in.
+    SupportMessage {
+        peer: PeerId,
+        id: u64,
+        sent_at: i64,
+        text: String,
+    },
+    /// A support contact (the author's node) answered.
+    SupportReply {
+        peer: PeerId,
+        id: u64,
+        sent_at: i64,
+        text: String,
+    },
+    /// A support message or reply reached the other side.
+    SupportDelivered { peer: PeerId, id: u64 },
+    /// It did not; nothing is retried automatically.
+    SupportFailed {
+        peer: PeerId,
+        id: u64,
+        reason: String,
+    },
+
+    // ------------------------------------------------------------ selftest
+    /// The result of `Node::selftest`, as JSON (see `node/selftest.rs`).
+    SelfTest { handle: u64, report: String },
+
     // ---------------------------------------- calls (feature `calls`, spike)
     /// A friend is calling. `media` is the moq URL their media sidecar will
     /// serve (`iroh://<node>/call/<id>`); nothing carries media yet.

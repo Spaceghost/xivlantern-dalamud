@@ -5,18 +5,19 @@ mod calls;
 mod friends;
 #[cfg(feature = "nostr")]
 mod nostr;
+mod selftest;
 
 pub use friends::{FriendInfo, HistoryEntry, PreparedInvite};
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use iroh::{
@@ -40,7 +41,9 @@ use crate::{
     proto::{self, Frame},
     store::Store,
     ticket::{NodeTicket, RoomTicket, Scope},
-    BlobHandle, ConnHandle, Error, Result, RoomHandle, MAX_MESSAGE,
+    ratelimit::Limits,
+    BlobHandle, ConnHandle, Error, Result, RoomHandle, GOSSIP_MAX_FRAME, MAX_MESSAGE,
+    MAX_ROOM_MESSAGE,
 };
 
 // ---------------------------------------------------------------- statistics
@@ -50,6 +53,7 @@ pub struct Stats {
     pub bytes_sent: AtomicU64,
     pub bytes_recv: AtomicU64,
     pub events_dropped: AtomicU64,
+    pub rate_limited: AtomicU64,
 }
 
 /// Snapshot handed to the UI once a frame.
@@ -63,6 +67,8 @@ pub struct StatsSnapshot {
     pub relayed_conns: u32,
     pub publishing_rooms: u32,
     pub events_dropped: u32,
+    /// Frames dropped by the per-peer rate limits since open.
+    pub rate_limited: u32,
 }
 
 // --------------------------------------------------------------- shared state
@@ -74,6 +80,9 @@ struct RoomState {
     label: String,
     peers: BTreeSet<EndpointId>,
     joined: bool,
+    /// Set for an author channel: only announcements signed by this key are
+    /// surfaced, and nothing else from the room is.
+    author: Option<[u8; 32]>,
     /// Blobs we are actively serving into this room.
     offering: BTreeSet<[u8; 32]>,
 }
@@ -113,6 +122,15 @@ struct Shared {
     #[cfg_attr(not(feature = "calls"), allow(dead_code))]
     calls: Mutex<HashMap<u64, EndpointId>>,
     me: RwLock<friends::Me>,
+    /// Refused at every door: friend links, direct connections, room frames.
+    blocked: RwLock<HashSet<EndpointId>>,
+    limits: Mutex<Limits>,
+    /// Nodes whose `SupportReply` frames are accepted from outside the friend
+    /// list: the author's nodes, as configured by the plugin.
+    support_contacts: RwLock<HashSet<EndpointId>>,
+    /// Author mode: accept support messages from anyone (rate limited).
+    accept_support: bool,
+    selftest_alpn: Vec<u8>,
 }
 
 impl Shared {
@@ -139,6 +157,33 @@ impl Shared {
         self.emit(Event::Error {
             message: message.into(),
         });
+    }
+
+    fn is_blocked(&self, peer: &EndpointId) -> bool {
+        self.blocked.read().unwrap().contains(peer)
+    }
+
+    /// Spend a token from `peer`'s bucket for `what`; on refusal, maybe tell
+    /// the UI (once per peer per `NOTICE_EVERY`).
+    fn allow(&self, peer: &EndpointId, what: &'static str) -> bool {
+        let now = Instant::now();
+        let mut limits = self.limits.lock().unwrap();
+        let ok = match what {
+            "room" => limits.room.allow(peer.as_bytes(), now),
+            "stranger" => limits.stranger.allow(peer.as_bytes(), now),
+            _ => limits.friend.allow(peer.as_bytes(), now),
+        };
+        if !ok {
+            self.stats.rate_limited.fetch_add(1, Ordering::Relaxed);
+            if limits.should_warn(peer.as_bytes(), now) {
+                drop(limits);
+                self.emit(Event::RateLimited {
+                    peer: *peer.as_bytes(),
+                    what: what.to_string(),
+                });
+            }
+        }
+        ok
     }
 }
 
@@ -248,6 +293,10 @@ async fn pump_connection(
 impl ProtocolHandler for DirectProtocol {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let shared = self.shared.0.clone();
+        if shared.is_blocked(&connection.remote_id()) {
+            connection.close(1u32.into(), b"blocked");
+            return Ok(());
+        }
         let conns = self.shared.1.clone();
         let handle = shared.handle();
         pump_connection(shared, conns, connection, handle).await;
@@ -346,6 +395,7 @@ impl Runner {
         let shared = self.shared.clone();
         let presence = self.presence.clone();
         let secret = self.shared.secret.clone();
+        let author = self.shared.rooms.read().unwrap().get(&room).and_then(|s| s.author);
         let task = tokio::spawn(async move {
             while let Some(next) = rx.next().await {
                 let event = match next {
@@ -363,6 +413,18 @@ impl Runner {
                             .unwrap()
                             .get_mut(&room)
                             .map(|s| s.peers.insert(peer));
+                        if let Some(author) = author {
+                            // An author channel shows nobody to anybody; it
+                            // only passes the latest announcements along.
+                            for signed in author_reoffer(&shared, &author) {
+                                let bytes = proto::encode(&secret, &Frame::App(signed));
+                                let _ = tx.broadcast_neighbors(bytes.into()).await;
+                            }
+                            continue;
+                        }
+                        if shared.is_blocked(&peer) {
+                            continue;
+                        }
                         shared.emit(Event::PeerJoined {
                             room,
                             peer: *peer.as_bytes(),
@@ -385,6 +447,9 @@ impl Runner {
                             .unwrap()
                             .get_mut(&room)
                             .map(|s| s.peers.remove(&peer));
+                        if author.is_some() || shared.is_blocked(&peer) {
+                            continue;
+                        }
                         shared.emit(Event::PeerLeft {
                             room,
                             peer: *peer.as_bytes(),
@@ -402,6 +467,15 @@ impl Runner {
                             // Unsigned, forged or from a future protocol.
                             continue;
                         };
+                        if shared.is_blocked(&from) || !shared.allow(&from, "room") {
+                            continue;
+                        }
+                        if let Some(author) = author {
+                            if let Frame::App(data) = frame {
+                                author_frame(&shared, room, &author, &data);
+                            }
+                            continue;
+                        }
                         let peer: PeerId = *from.as_bytes();
                         match frame {
                             Frame::App(data) => {
@@ -635,6 +709,10 @@ pub struct Node {
     blob_owner: Mutex<Option<BlobOwner>>,
     closed: AtomicBool,
     _router: Mutex<Option<Router>>,
+    /// The relay mode the endpoint was built with (`None`: relays off), for
+    /// the selftest's probes.
+    relay_mode: Option<iroh::RelayMode>,
+    accept_inbound: bool,
 }
 
 /// Held only so the store's actor lives as long as the node does. Dropping it
@@ -665,17 +743,17 @@ impl Node {
         // so the n0 preset (which publishes to and resolves from n0's DNS) is
         // not used at all. A custom relay URL that does not parse is an error,
         // never a silent fallback to somebody else's relay.
-        let mut builder = match &config.relay {
-            RelayMode::Disabled => {
-                Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled)
-            }
-            RelayMode::Default => {
-                Endpoint::builder(presets::N0).relay_mode(iroh::RelayMode::Default)
-            }
+        let relay_mode = match &config.relay {
+            RelayMode::Disabled => None,
+            RelayMode::Default => Some(iroh::RelayMode::Default),
             RelayMode::Custom(url) => {
                 let url: RelayUrl = url.parse().map_err(|_| Error::Arg("relay url did not parse"))?;
-                Endpoint::builder(presets::N0).relay_mode(iroh::RelayMode::Custom(url.into()))
+                Some(iroh::RelayMode::Custom(url.into()))
             }
+        };
+        let mut builder = match &relay_mode {
+            None => Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled),
+            Some(mode) => Endpoint::builder(presets::N0).relay_mode(mode.clone()),
         };
         builder = builder
             .secret_key(secret.clone())
@@ -712,6 +790,11 @@ impl Node {
             links: Mutex::new(HashMap::new()),
             invites: Mutex::new(HashMap::new()),
             calls: Mutex::new(HashMap::new()),
+            blocked: RwLock::new(HashSet::new()),
+            limits: Mutex::new(Limits::default()),
+            support_contacts: RwLock::new(HashSet::new()),
+            accept_support: config.accept_support,
+            selftest_alpn: config.selftest_alpn(),
             me: RwLock::new(friends::Me::default()),
         });
         friends::load(&shared)?;
@@ -746,7 +829,9 @@ impl Node {
         let alpn = config.direct_alpn();
 
         let router = rt.block_on(async {
-            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let gossip = Gossip::builder()
+                .max_message_size(GOSSIP_MAX_FRAME)
+                .spawn(endpoint.clone());
             let blobs_proto = BlobsProtocol::new(&blobs, None);
             let router = if config.accept_inbound {
                 Router::builder(endpoint.clone())
@@ -762,6 +847,7 @@ impl Node {
                         shared.friend_alpn.clone(),
                         friends::FriendProtocol::new(shared.clone()),
                     )
+                    .accept(shared.selftest_alpn.clone(), selftest::Probe)
                     .spawn()
             } else {
                 Router::builder(endpoint.clone()).spawn()
@@ -796,6 +882,8 @@ impl Node {
             blob_owner: Mutex::new(Some(blob_owner)),
             closed: AtomicBool::new(false),
             _router: Mutex::new(Some(router)),
+            relay_mode,
+            accept_inbound: config.accept_inbound,
         })
     }
 
@@ -873,6 +961,7 @@ impl Node {
             relayed_conns: 0,
             publishing_rooms: publishing,
             events_dropped: self.shared.stats.events_dropped.load(Ordering::Relaxed) as u32,
+            rate_limited: self.shared.stats.rate_limited.load(Ordering::Relaxed) as u32,
         }
     }
 
@@ -913,7 +1002,7 @@ impl Node {
                 )
             }
         };
-        self.join(scope, topic, bootstrap, label)
+        self.join(scope, topic, bootstrap, label, None)
     }
 
     fn join(
@@ -922,6 +1011,7 @@ impl Node {
         topic: TopicId,
         bootstrap: Vec<EndpointAddr>,
         label: String,
+        author: Option<[u8; 32]>,
     ) -> Result<RoomHandle> {
         let room = self.shared.handle();
         self.shared.rooms.write().unwrap().insert(
@@ -933,6 +1023,7 @@ impl Node {
                 peers: BTreeSet::new(),
                 joined: false,
                 offering: BTreeSet::new(),
+                author,
             },
         );
         self.push(Cmd::RoomJoin {
@@ -951,7 +1042,99 @@ impl Node {
         let key = data_encoding::HEXLOWER.encode(&friends::random::<32>());
         let topic = crate::topic::derive(&self.shared.app_id, Scope::Custom, &key);
         let label = if label.is_empty() { "channel" } else { label };
-        self.join(Scope::Custom, topic, Vec::new(), label.to_string())
+        self.join(Scope::Custom, topic, Vec::new(), label.to_string(), None)
+    }
+
+    /// Remember where a node can be reached (an `lpnode…` ticket), so dialing
+    /// it by NodeId alone works without relays or DNS: on a LAN, or in tests.
+    pub fn add_address_hint(&self, node_ticket: &str) -> Result<()> {
+        self.check_open()?;
+        let addr = parse_dial_target(node_ticket)?;
+        self.shared.lookup.add_endpoint_info(addr);
+        Ok(())
+    }
+
+    /// Join the author channel for `author` (an ed25519 public key; see
+    /// `author.rs`). `bootstrap` are the author's always-on nodes. Joining
+    /// twice returns the same room. Only verified announcements come out of
+    /// it, as `Event::Announcement`; `room_send` refuses it.
+    pub fn author_join(&self, author: &[u8; 32], bootstrap: &[PeerId]) -> Result<RoomHandle> {
+        self.check_open()?;
+        iroh::PublicKey::from_bytes(author).map_err(|_| Error::Arg("not an author key"))?;
+        if let Some((room, _)) = self
+            .shared
+            .rooms
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(_, s)| s.author.as_ref() == Some(author))
+        {
+            return Ok(*room);
+        }
+        let me = self.shared.endpoint.id();
+        let peers = bootstrap
+            .iter()
+            .filter_map(|p| EndpointId::from_bytes(p).ok())
+            .filter(|p| *p != me)
+            .map(EndpointAddr::from)
+            .collect();
+        let topic = crate::author::topic(&self.shared.app_id, author);
+        self.join(Scope::Public, topic, peers, "author".to_string(), Some(*author))
+    }
+
+    /// Publish an announcement signed offline (`lpannounce…`) into an author
+    /// channel. Refused unless the room's author key signed it. Returns its
+    /// sequence number. **Touches SQLite**; for the author's own tools.
+    pub fn author_announce(&self, room: RoomHandle, signed: &str) -> Result<u64> {
+        self.check_open()?;
+        let author = self
+            .shared
+            .rooms
+            .read()
+            .unwrap()
+            .get(&room)
+            .ok_or(Error::NotFound)?
+            .author
+            .ok_or(Error::State("not an author channel"))?;
+        let signed: crate::author::SignedAnnouncement = signed.parse()?;
+        let a = signed
+            .verify(&author)
+            .ok_or(Error::Arg("not signed by this channel's author key"))?;
+        let bytes = signed.to_bytes();
+        author_frame(&self.shared, room, &author, &bytes);
+        self.push(Cmd::RoomBroadcast {
+            room,
+            frame: Frame::App(bytes),
+        })?;
+        Ok(a.seq)
+    }
+
+    /// Announcements kept for `author`, newest first. **Reads SQLite.**
+    pub fn announcements(&self, author: &[u8; 32], limit: u32) -> Result<Vec<crate::author::Announcement>> {
+        let store = self
+            .shared
+            .store
+            .lock()
+            .map_err(|_| Error::Store("store poisoned".into()))?;
+        Ok(store.announcements(author, limit)?.into_iter().map(|(a, _)| a).collect())
+    }
+
+    pub fn announcements_json(&self, author: &[u8; 32], limit: u32) -> Result<String> {
+        let mut out = String::from("[");
+        for (i, a) in self.announcements(author, limit)?.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "{{\"seq\":{},\"issued_at\":{},\"title\":{},\"body\":{}}}",
+                a.seq,
+                a.issued_at,
+                json_string(&a.title),
+                json_string(&a.body)
+            ));
+        }
+        out.push(']');
+        Ok(out)
     }
 
     /// The display label a room was joined or created with.
@@ -985,11 +1168,15 @@ impl Node {
     }
 
     pub fn room_send(&self, room: RoomHandle, data: &[u8]) -> Result<()> {
-        if data.len() > MAX_MESSAGE {
+        if data.len() > MAX_ROOM_MESSAGE {
             return Err(Error::TooLarge);
         }
-        if !self.shared.rooms.read().unwrap().contains_key(&room) {
-            return Err(Error::NotFound);
+        match self.shared.rooms.read().unwrap().get(&room) {
+            None => return Err(Error::NotFound),
+            Some(s) if s.author.is_some() => {
+                return Err(Error::State("the author channel only carries signed announcements"))
+            }
+            Some(_) => {}
         }
         self.push(Cmd::RoomBroadcast {
             room,
@@ -998,7 +1185,7 @@ impl Node {
     }
 
     pub fn presence_set(&self, room: RoomHandle, data: &[u8]) -> Result<()> {
-        if data.len() > MAX_MESSAGE {
+        if data.len() > MAX_ROOM_MESSAGE {
             return Err(Error::TooLarge);
         }
         if !self.shared.rooms.read().unwrap().contains_key(&room) {
@@ -1215,6 +1402,49 @@ impl Drop for Node {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_timeout(std::time::Duration::from_millis(500));
         }
+    }
+}
+
+/// The newest announcements this node keeps for `author`, signed, oldest
+/// first, for a new neighbour in the author channel.
+fn author_reoffer(shared: &Shared, author: &[u8; 32]) -> Vec<Vec<u8>> {
+    let Ok(store) = shared.store.lock() else {
+        return Vec::new();
+    };
+    let mut out: Vec<Vec<u8>> = store
+        .announcements(author, 3)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, signed)| signed)
+        .collect();
+    out.reverse();
+    out
+}
+
+/// A message in an author channel: shown only if it is an announcement the
+/// author key signed, and only the first time.
+fn author_frame(shared: &Shared, room: RoomHandle, author: &[u8; 32], data: &[u8]) {
+    let Some(signed) = crate::author::SignedAnnouncement::from_bytes(data) else {
+        return;
+    };
+    let Some(a) = signed.verify(author) else {
+        return;
+    };
+    let fresh = shared
+        .store
+        .lock()
+        .ok()
+        .and_then(|mut s| s.announcement_put(author, &a, data).ok())
+        .unwrap_or(false);
+    if fresh {
+        shared.emit(Event::Announcement {
+            room,
+            author: *author,
+            seq: a.seq,
+            issued_at: a.issued_at,
+            title: a.title,
+            body: a.body,
+        });
     }
 }
 

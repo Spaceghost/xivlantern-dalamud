@@ -14,11 +14,13 @@
 //! and stop the runtime, open SQLite and bind the endpoint. Everything else is
 //! safe to call once per frame.
 
+pub mod author;
 pub mod config;
 #[cfg(feature = "nostr")]
 pub mod nostr;
 pub mod event;
 pub mod proto;
+pub mod ratelimit;
 pub mod store;
 pub mod ticket;
 pub mod topic;
@@ -30,8 +32,19 @@ pub use event::{BlobMeta, Event, PeerId, Status};
 pub use node::{FriendInfo, HistoryEntry, Node, PreparedInvite};
 pub use ticket::{FriendInvite, RoomTicket, Scope};
 
-/// Largest single room or direct message. Anything bigger belongs in a blob.
+/// Largest single direct-connection message. Anything bigger belongs in a blob.
 pub const MAX_MESSAGE: usize = 61440;
+
+/// Largest room/channel message or presence payload. Gossip frames also carry
+/// the author's signed envelope; the gossip limit is set to leave room for it.
+pub const MAX_ROOM_MESSAGE: usize = 6144;
+
+/// Largest 1:1 text (UTF-8 bytes). Chat, not documents.
+pub const MAX_TEXT: usize = 2048;
+
+/// The gossip layer's own frame limit, set above `MAX_ROOM_MESSAGE` plus the
+/// envelope (the gossip default of 4096 would silently drop larger frames).
+pub const GOSSIP_MAX_FRAME: usize = 8192;
 
 /// The ABI/protocol generation. Bumped only on a wire-incompatible change.
 pub const PROTOCOL_VERSION: u16 = 1;

@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{ticket::Scope, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     db: Connection,
@@ -173,7 +173,111 @@ impl Store {
                 )
                 .map_err(store_err)?;
         }
+        if version < 3 {
+            self.db
+                .execute_batch(
+                    "CREATE TABLE IF NOT EXISTS blocked (
+                        node_id    BLOB PRIMARY KEY,
+                        blocked_at INTEGER NOT NULL
+                     );
+                     CREATE TABLE IF NOT EXISTS announcements (
+                        author      BLOB NOT NULL,
+                        seq         INTEGER NOT NULL,
+                        issued_at   INTEGER NOT NULL,
+                        title       TEXT NOT NULL,
+                        body        TEXT NOT NULL,
+                        signed      BLOB NOT NULL,
+                        received_at INTEGER NOT NULL,
+                        PRIMARY KEY (author, seq)
+                     );
+                     PRAGMA user_version = 3;",
+                )
+                .map_err(store_err)?;
+        }
         Ok(())
+    }
+
+    // ------------------------------------------------------------- blocked
+
+    pub fn block(&mut self, node_id: &[u8; 32]) -> Result<()> {
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO blocked (node_id, blocked_at) VALUES (?1, ?2)",
+                params![node_id.to_vec(), now_ms()],
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    pub fn unblock(&mut self, node_id: &[u8; 32]) -> Result<bool> {
+        let n = self
+            .db
+            .execute("DELETE FROM blocked WHERE node_id = ?1", params![node_id.to_vec()])
+            .map_err(store_err)?;
+        Ok(n > 0)
+    }
+
+    pub fn blocked(&self) -> Result<Vec<[u8; 32]>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT node_id FROM blocked ORDER BY blocked_at")
+            .map_err(store_err)?;
+        let rows = stmt
+            .query_map([], |r| blob32(r.get(0)?))
+            .map_err(store_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(store_err)
+    }
+
+    // -------------------------------------------------------- announcements
+
+    /// Keep a verified announcement. `false` when this (author, seq) was
+    /// already kept: a re-offer, not news.
+    pub fn announcement_put(
+        &mut self,
+        author: &[u8; 32],
+        a: &crate::author::Announcement,
+        signed: &[u8],
+    ) -> Result<bool> {
+        let n = self
+            .db
+            .execute(
+                "INSERT OR IGNORE INTO announcements
+                    (author, seq, issued_at, title, body, signed, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![author.to_vec(), a.seq as i64, a.issued_at, a.title, a.body, signed, now_ms()],
+            )
+            .map_err(store_err)?;
+        Ok(n > 0)
+    }
+
+    /// The newest `limit` announcements by `author`, newest first, with the
+    /// signed bytes so they can be re-offered.
+    pub fn announcements(
+        &self,
+        author: &[u8; 32],
+        limit: u32,
+    ) -> Result<Vec<(crate::author::Announcement, Vec<u8>)>> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT seq, issued_at, title, body, signed FROM announcements
+                 WHERE author = ?1 ORDER BY seq DESC LIMIT ?2",
+            )
+            .map_err(store_err)?;
+        let rows = stmt
+            .query_map(params![author.to_vec(), limit as i64], |r| {
+                Ok((
+                    crate::author::Announcement {
+                        seq: r.get::<_, i64>(0)? as u64,
+                        issued_at: r.get(1)?,
+                        title: r.get(2)?,
+                        body: r.get(3)?,
+                    },
+                    r.get::<_, Vec<u8>>(4)?,
+                ))
+            })
+            .map_err(store_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(store_err)
     }
 
     // ------------------------------------------------------------- profile
@@ -706,6 +810,33 @@ mod tests {
         let friends: i64 = s.db.query_row("SELECT count(*) FROM friends", [], |r| r.get(0)).unwrap();
         assert_eq!(friends, 1, "the empty friend row is gone");
         assert_eq!(s.friend_bind_nostr(&[7u8; 32], &key).unwrap(), None, "strangers are not bound");
+    }
+
+    #[test]
+    fn blocking_is_kept_and_undone() {
+        let mut s = Store::open(None).unwrap();
+        s.block(&[3u8; 32]).unwrap();
+        s.block(&[3u8; 32]).unwrap();
+        assert_eq!(s.blocked().unwrap(), vec![[3u8; 32]]);
+        assert!(s.unblock(&[3u8; 32]).unwrap());
+        assert!(!s.unblock(&[3u8; 32]).unwrap());
+        assert!(s.blocked().unwrap().is_empty());
+    }
+
+    #[test]
+    fn announcements_are_kept_once_newest_first() {
+        use crate::author::Announcement;
+        let mut s = Store::open(None).unwrap();
+        let author = [8u8; 32];
+        let a = |seq| Announcement { seq, issued_at: seq as i64, title: format!("t{seq}"), body: String::new() };
+        assert!(s.announcement_put(&author, &a(1), b"one").unwrap());
+        assert!(!s.announcement_put(&author, &a(1), b"one").unwrap(), "a re-offer is not news");
+        assert!(s.announcement_put(&author, &a(2), b"two").unwrap());
+        assert!(s.announcement_put(&[9u8; 32], &a(3), b"other").unwrap());
+        let got = s.announcements(&author, 10).unwrap();
+        assert_eq!(got.iter().map(|(a, _)| a.seq).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(got[0].1, b"two");
+        assert_eq!(s.announcements(&author, 1).unwrap().len(), 1);
     }
 
     #[test]

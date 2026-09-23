@@ -20,9 +20,14 @@ struct Cli {
 
 impl Cli {
     fn start(name: &'static str, dir: &std::path::Path) -> Cli {
+        Self::start_with(name, dir, &[])
+    }
+
+    fn start_with(name: &'static str, dir: &std::path::Path, extra: &[&str]) -> Cli {
         let mut child = Command::new(env!("CARGO_BIN_EXE_linkpearl"))
             .args(["--db", dir.join(format!("{name}.sqlite")).to_str().unwrap()])
             .args(["--name", name, "--relay", "off", "--heartbeat-ms", "500"])
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -128,4 +133,68 @@ fn two_clis_befriend_chat_and_share_a_channel() {
     alice.expect("* Bob is offline");
     alice.send("/quit");
     alice.expect("bye");
+}
+
+fn author_tool(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_linkpearl"))
+        .arg("author")
+        .args(args)
+        .output()
+        .expect("run linkpearl author");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn the_author_publishes_and_answers_a_player() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("author.key");
+    let key = key.to_str().unwrap();
+    author_tool(&["keygen", "--key", key]);
+    let public = author_tool(&["pubkey", "--key", key]).trim().to_string();
+
+    let mut author = Cli::start_with("Author", dir.path(), &["--author-mode", &public]);
+    author.expect("ready ");
+    let ticket = author.expect("lpnode").trim().to_string();
+    let id_line = author.seen.iter().find(|l| l.starts_with("ready ")).unwrap().clone();
+    let author_id = id_line.split_whitespace().nth(1).unwrap().to_string();
+
+    // A player: the author's key and node are all the plugin would embed. With
+    // relays off the player also needs a hint for where that node is.
+    let mut player = Cli::start_with("Player", dir.path(), &["--author", &public, "--author-node", &author_id]);
+    player.expect("ready ");
+    player.send(&format!("/hint {ticket}"));
+    player.expect("noted");
+
+    let signed = author_tool(&["sign", "--key", key, "--seq", "1", "--title", "Hello", "--body", "Welcome to Linkpearl"]);
+    // The node may not have met the player yet; announce once they are neighbours.
+    std::thread::sleep(Duration::from_secs(2));
+    author.send(&format!("/announce {}", signed.trim()));
+    author.expect("announcement #1 published");
+    player.expect("[author, verified] #1 Hello");
+    player.expect("Welcome to Linkpearl");
+
+    player.send("/support the invite button does nothing");
+    author.expect("[support from");
+    player.expect("delivered");
+    let prefix = author
+        .expect("(/reply ")
+        .split("(/reply ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    author.send(&format!("/reply {prefix} fixed in 0.1.1"));
+    player.expect("[author] fixed in 0.1.1");
+
+    player.send("/selftest");
+    let report = player.expect("\"direct\":");
+    assert!(report.contains("\"direct\":{\"ok\":true"), "{report}");
+
+    player.send("/quit");
+    author.send("/quit");
+    player.expect("bye");
+    author.expect("bye");
 }

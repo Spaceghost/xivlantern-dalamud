@@ -18,3 +18,4 @@ data-encoding.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+iroh.workspace = true
