@@ -1,0 +1,3 @@
+Build with:
+  dotnet test bindings/csharp/Linkpearl.Tests -c Release
+after scripts/build-native.sh has put liblinkpearl.so where LINKPEARL_NATIVE_DIR points.

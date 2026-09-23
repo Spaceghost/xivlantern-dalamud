@@ -1,0 +1,27 @@
+[package]
+name = "linkpearl-core"
+description = "Rooms, presence, messages and blobs over iroh, shaped for a game plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+iroh.workspace = true
+iroh-gossip.workspace = true
+iroh-blobs.workspace = true
+n0-future.workspace = true
+tokio.workspace = true
+serde.workspace = true
+postcard.workspace = true
+bytes.workspace = true
+data-encoding.workspace = true
+blake3.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
