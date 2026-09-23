@@ -286,3 +286,18 @@ fn oversized_messages_are_refused_before_they_hit_the_wire() {
     assert!(n.room_send(room, &too_big[..linkpearl_core::MAX_ROOM_MESSAGE]).is_ok());
     n.close();
 }
+
+#[test]
+fn a_node_with_no_database_opens_in_memory() {
+    // db_path None is what a throwaway selftest node uses; it once panicked
+    // because the in-memory blob store was created outside the runtime.
+    let config = Config {
+        relay: RelayMode::Disabled,
+        ..Config::in_memory("linkpearl-test/1")
+    };
+    let a = Node::open(config.clone()).expect("in-memory node opens");
+    let b = Node::open(config).expect("and another");
+    assert_ne!(a.node_id(), b.node_id(), "no database, so a fresh identity each time");
+    a.close();
+    b.close();
+}

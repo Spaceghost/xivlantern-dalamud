@@ -816,6 +816,8 @@ impl Node {
                 (BlobOwner::Fs(fs), api)
             }
             None => {
+                // MemStore spawns its actor on the current runtime.
+                let _in_runtime = rt.enter();
                 let mem = MemStore::new();
                 let api = (*mem).clone();
                 (BlobOwner::Mem(mem), api)
