@@ -112,5 +112,5 @@ lantern --db alice.sqlite --name Alice --relay off     # /help for commands
 ## Releasing
 
 `tools/release.sh`, the same as every one of these mods; see
-[docs/RELEASING.md](docs/RELEASING.md). The GitHub repository does not exist
-yet, so nothing has been released.
+[docs/RELEASING.md](docs/RELEASING.md). Test builds are out (the newest is on the
+[releases page](https://github.com/Spaceghost/xivlantern-dalamud/releases)); there is no stable release yet.
