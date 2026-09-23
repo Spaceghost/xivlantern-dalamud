@@ -87,6 +87,16 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, byte*, int> BookmarkPut;
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> BookmarkForget;
     public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> BookmarkList;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> ProfileSetName;
+    public static delegate* unmanaged[Cdecl]<nint, uint, byte*, int> PresenceStatusSet;
+    public static delegate* unmanaged[Cdecl]<nint, uint, byte*, nuint, nuint*, int> InviteCreate;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> InviteAccept;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> FriendList;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int> FriendSend;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> FriendRemove;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int> FriendHistory;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> ChannelCreate;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong, int> ChannelInvite;
 
     /// <summary>
     /// The file name to look for in the plugin folder. Dalamud loads the managed
@@ -143,6 +153,16 @@ internal static unsafe class Native
             BookmarkPut = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, byte*, int>)NativeLibrary.GetExport(lib, "lp_bookmark_put");
             BookmarkForget = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_bookmark_forget");
             BookmarkList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_bookmark_list");
+            ProfileSetName = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_profile_set_name");
+            PresenceStatusSet = (delegate* unmanaged[Cdecl]<nint, uint, byte*, int>)NativeLibrary.GetExport(lib, "lp_presence_status_set");
+            InviteCreate = (delegate* unmanaged[Cdecl]<nint, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_invite_create");
+            InviteAccept = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lp_invite_accept");
+            FriendList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_friend_list");
+            FriendSend = (delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int>)NativeLibrary.GetExport(lib, "lp_friend_send");
+            FriendRemove = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_friend_remove");
+            FriendHistory = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_friend_history");
+            ChannelCreate = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lp_channel_create");
+            ChannelInvite = (delegate* unmanaged[Cdecl]<nint, byte*, ulong, int>)NativeLibrary.GetExport(lib, "lp_channel_invite");
 
             library = lib;
         }

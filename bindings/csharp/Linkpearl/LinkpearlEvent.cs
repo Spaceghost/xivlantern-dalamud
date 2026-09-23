@@ -25,6 +25,29 @@ public enum LinkpearlEventKind : uint
     Publishing = 16,
     Error = 17,
     Log = 18,
+
+    /// <summary>Handle = invite handle (0 when they redeemed ours); Text = name.</summary>
+    FriendAdded = 19,
+    FriendRemoved = 20,
+    /// <summary>Handle = invite handle; Text = reason.</summary>
+    InviteFailed = 21,
+    /// <summary>Handle = <see cref="PresenceStatus"/>; Text = the friend's note.</summary>
+    FriendOnline = 22,
+    FriendOffline = 23,
+    /// <summary>Handle = message id; Text = the message.</summary>
+    FriendText = 24,
+    /// <summary>Handle = the id <see cref="LinkpearlNode.FriendSend"/> returned.</summary>
+    FriendDelivered = 25,
+    /// <summary>Text = a room ticket for <see cref="LinkpearlNode.RoomJoin"/>.</summary>
+    ChannelInvite = 26,
+}
+
+public enum PresenceStatus : uint
+{
+    Invisible = 0,
+    Online = 1,
+    Away = 2,
+    Busy = 3,
 }
 
 /// <param name="Kind">What happened.</param>
@@ -46,6 +69,9 @@ public readonly record struct LinkpearlEvent(
     /// <summary>True for <see cref="LinkpearlEventKind.Publishing"/> events that
     /// mean "you are live".</summary>
     public bool Publishing => Kind == LinkpearlEventKind.Publishing && Data.Length > 0 && Data[0] != 0;
+
+    /// <summary>For <see cref="LinkpearlEventKind.FriendOnline"/>.</summary>
+    public PresenceStatus Status => (PresenceStatus)Handle;
 
     /// <summary>Bytes transferred so far, for a progress event.</summary>
     public (ulong Done, ulong Total) Progress => Data.Length >= 16

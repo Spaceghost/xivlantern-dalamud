@@ -342,6 +342,112 @@ public sealed unsafe class LinkpearlNode : IDisposable
     public string BlobHash(ulong blob) =>
         Text((b, len, need) => Native.BlobHashText(Handle, blob, b, len, need), "blob hash");
 
+    // -------------------------------------------------------------- friends
+
+    /// <summary>The name friends see. Persisted.</summary>
+    public void SetDisplayName(string name)
+    {
+        using var buf = new Utf8Buffer(name);
+        Check(Native.ProfileSetName(Handle, (byte*)buf.Pointer), "name");
+    }
+
+    /// <summary>
+    /// What friends see. The note must be something the player typed; never
+    /// fill it from game state without the player asking.
+    /// </summary>
+    public void SetPresence(PresenceStatus status, string? note = null)
+    {
+        using var buf = new Utf8Buffer(note);
+        Check(Native.PresenceStatusSet(Handle, (uint)status, (byte*)buf.Pointer), "presence status");
+    }
+
+    /// <summary>A single-use friend invite. 0 seconds never expires.</summary>
+    public string InviteCreate(uint ttlSeconds = 0) =>
+        Text((b, len, need) => Native.InviteCreate(Handle, ttlSeconds, b, len, need), "invite");
+
+    /// <summary>Redeem an invite. FriendAdded or InviteFailed with the
+    /// returned handle arrives from Poll().</summary>
+    public ulong InviteAccept(string ticket)
+    {
+        using var buf = new Utf8Buffer(ticket);
+        ulong handle;
+        Check(Native.InviteAccept(Handle, (byte*)buf.Pointer, &handle), "invite accept");
+        return handle;
+    }
+
+    /// <summary>The friend list as the JSON documented in linkpearl.h.</summary>
+    public string FriendsJson() =>
+        Text((b, len, need) => Native.FriendList(Handle, b, len, need), "friends");
+
+    /// <summary>Send a 1:1 text; returns the id FriendDelivered will carry.</summary>
+    public ulong FriendSend(byte[] peer, string text)
+    {
+        CheckPeer(peer);
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        ulong id;
+        fixed (byte* p = peer)
+        fixed (byte* t = bytes)
+        {
+            Check(Native.FriendSend(Handle, p, t, (uint)bytes.Length, &id), "friend send");
+        }
+
+        return id;
+    }
+
+    public void FriendRemove(byte[] peer)
+    {
+        CheckPeer(peer);
+        fixed (byte* p = peer)
+        {
+            Check(Native.FriendRemove(Handle, p), "friend remove");
+        }
+    }
+
+    /// <summary>Last texts with a friend, oldest first, as JSON. Reads
+    /// SQLite: keep it out of Draw.</summary>
+    public string FriendHistoryJson(byte[] peer, uint limit = 50)
+    {
+        CheckPeer(peer);
+        return Text(
+            (b, len, need) =>
+            {
+                fixed (byte* p = peer)
+                {
+                    return Native.FriendHistory(Handle, p, limit, b, len, need);
+                }
+            },
+            "friend history");
+    }
+
+    // ------------------------------------------------------------- channels
+
+    /// <summary>A group channel nobody can find without its ticket.</summary>
+    public ulong ChannelCreate(string label)
+    {
+        using var buf = new Utf8Buffer(label);
+        ulong room;
+        Check(Native.ChannelCreate(Handle, (byte*)buf.Pointer, &room), "channel create");
+        return room;
+    }
+
+    public void ChannelInvite(byte[] peer, ulong room)
+    {
+        CheckPeer(peer);
+        fixed (byte* p = peer)
+        {
+            Check(Native.ChannelInvite(Handle, p, room), "channel invite");
+        }
+    }
+
+    private static void CheckPeer(byte[] peer)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+        if (peer.Length != Native.NodeIdLen)
+        {
+            throw new ArgumentException($"a node id is {Native.NodeIdLen} bytes", nameof(peer));
+        }
+    }
+
     // ------------------------------------------------------------ bookmarks
 
     public void BookmarkPut(string id, RoomScope scope, string title, string ticket)
