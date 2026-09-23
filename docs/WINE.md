@@ -15,8 +15,8 @@
 * `tests/wine/abi_smoke.c`, built with `x86_64-w64-mingw32-gcc` against the
   DLL, loads it the way the plugin does, opens an in-memory node, mints an
   invite and runs `lp_selftest`.
-* Run in the `fedora:ghostty-wine` container: Wine 11.0 (Staging), Fedora 44,
-  a prefix of its own (`/root/linkpearl-wine/prefix`), never the game's.
+* Run in the `fedora:ghostty-wine` container: Wine 11.0 (Staging),
+  Fedora 43, a prefix of its own (`/root/linkpearl-wine/prefix`), never the game's.
 
 ## Observed 2026-09-23
 
