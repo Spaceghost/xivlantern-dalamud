@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/linkpearl-core", "crates/linkpearl-ffi"]
+members = ["crates/linkpearl-core", "crates/linkpearl-ffi", "crates/linkpearl-cli"]
 
 [workspace.package]
 version = "0.1.0"

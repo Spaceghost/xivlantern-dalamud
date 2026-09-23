@@ -1845,6 +1845,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkpearl-cli"
+version = "0.1.0"
+dependencies = [
+ "linkpearl-core",
+ "tempfile",
+]
+
+[[package]]
 name = "linkpearl-core"
 version = "0.1.0"
 dependencies = [
