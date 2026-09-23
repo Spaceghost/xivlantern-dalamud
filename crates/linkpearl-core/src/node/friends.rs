@@ -181,6 +181,12 @@ pub(crate) enum Wire {
     Ack { id: u64 },
     ChannelInvite { ticket: String },
     Unfriend,
+    // Call signalling (spike). Always part of the wire format so frame
+    // numbering does not depend on features; a build without `calls`
+    // ignores them.
+    CallRing { call: u64, media: String },
+    CallAnswer { call: u64, accept: bool },
+    CallHangup { call: u64 },
 }
 
 pub(crate) fn encode(wire: &Wire) -> Vec<u8> {
@@ -516,6 +522,8 @@ async fn run_link(shared: Arc<Shared>, conn: Connection) {
     };
     if !still_linked {
         set_offline(&shared, peer);
+        #[cfg(feature = "calls")]
+        super::calls::link_lost(&shared, peer);
     }
 }
 
@@ -594,6 +602,12 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
             return false;
         }
         Wire::Redeem { .. } | Wire::Welcome { .. } | Wire::Refused { .. } => {}
+        #[cfg(feature = "calls")]
+        Wire::CallRing { .. } | Wire::CallAnswer { .. } | Wire::CallHangup { .. } => {
+            super::calls::on_frame(shared, peer, wire);
+        }
+        #[cfg(not(feature = "calls"))]
+        Wire::CallRing { .. } | Wire::CallAnswer { .. } | Wire::CallHangup { .. } => {}
     }
     true
 }
@@ -1104,6 +1118,15 @@ mod tests {
                 ticket: "lproomx".into(),
             },
             Wire::Unfriend,
+            Wire::CallRing {
+                call: 1,
+                media: "iroh://x/call/1".into(),
+            },
+            Wire::CallAnswer {
+                call: 1,
+                accept: true,
+            },
+            Wire::CallHangup { call: 1 },
         ];
         for f in frames {
             assert_eq!(decode(&encode(&f)), Some(f));

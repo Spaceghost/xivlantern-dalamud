@@ -38,3 +38,6 @@ nostr-sdk = { workspace = true, features = ["local-relay"] }
 # receive friend invites as NIP-17 direct messages. Never needed for direct or
 # LAN use; see docs/DESIGN.md.
 nostr = ["dep:nostr-sdk", "dep:nostr", "dep:serde_json"]
+# Spike: call signalling (ring, answer, hang up) over friend links. No media;
+# see docs/DESIGN.md "Calls and video".
+calls = []
