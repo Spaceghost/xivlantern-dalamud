@@ -15,6 +15,8 @@
 //! safe to call once per frame.
 
 pub mod config;
+#[cfg(feature = "nostr")]
+pub mod nostr;
 pub mod event;
 pub mod proto;
 pub mod store;

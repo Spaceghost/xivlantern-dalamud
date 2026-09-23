@@ -23,6 +23,18 @@ rusqlite.workspace = true
 getrandom.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+nostr-sdk = { workspace = true, optional = true }
+nostr = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# An in-process relay on 127.0.0.1 for the nostr tests; no real relay is ever
+# contacted.
+nostr-sdk = { workspace = true, features = ["local-relay"] }
+
+[features]
+# Optional nostr plumbing: publish and read the user's device list, and send or
+# receive friend invites as NIP-17 direct messages. Never needed for direct or
+# LAN use; see docs/DESIGN.md.
+nostr = ["dep:nostr-sdk", "dep:nostr", "dep:serde_json"]

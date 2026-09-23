@@ -578,6 +578,22 @@ pub unsafe extern "C" fn lp_poll(
                     slot.peer = peer;
                     Some(ticket.into_bytes())
                 }
+                // nostr is not in the C ABI yet; if a build enables it, its
+                // results surface as log lines rather than new event kinds.
+                Event::NostrDone { handle, ok, detail } => {
+                    slot.kind = LP_EV_LOG;
+                    slot.handle = handle;
+                    Some(format!("nostr: {} {detail}", if ok { "ok" } else { "failed" }).into_bytes())
+                }
+                Event::NostrInvite { ticket, .. } => {
+                    slot.kind = LP_EV_LOG;
+                    Some(format!("nostr invite: {ticket}").into_bytes())
+                }
+                Event::NostrDevices { handle, devices, .. } => {
+                    slot.kind = LP_EV_LOG;
+                    slot.handle = handle;
+                    Some(format!("nostr: {} devices", devices.len()).into_bytes())
+                }
             };
             if let Some(bytes) = payload {
                 slot.data_len = bytes.len() as u32;
