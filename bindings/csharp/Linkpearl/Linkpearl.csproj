@@ -7,6 +7,10 @@
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- Not "Linkpearl": the native library is linkpearl.dll, and Windows (and
+         Wine) file names ignore case, so the two would collide in the plugin folder. -->
+    <AssemblyName>Linkpearl.Interop</AssemblyName>
+    <RootNamespace>Linkpearl</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

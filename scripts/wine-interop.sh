@@ -15,8 +15,8 @@ mkfifo "$DIR/alice.in" "$DIR/bob.in"
 ( cd "$DIR" && wine "$BIN/linkpearl.exe" --db bob.sqlite --name BobOnWine --relay off <"$DIR/bob.in" >"$DIR/bob.out" 2>&1 ) &
 exec 3>"$DIR/alice.in" 4>"$DIR/bob.in"
 wait_for() {
-  local i
-  for i in $(seq 1 300); do grep -qF -- "$2" "$DIR/$1.out" && return 0; sleep 0.2; done
+
+  for _ in $(seq 1 300); do grep -qF -- "$2" "$DIR/$1.out" && return 0; sleep 0.2; done
   echo "timed out: $1 never printed: $2" >&2; cat "$DIR/alice.out" "$DIR/bob.out" >&2; exit 1
 }
 wait_for alice "ready "; wait_for bob "ready "

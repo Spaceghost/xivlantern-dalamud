@@ -5,3 +5,9 @@ obj/
 *.sqlite-wal
 *.sqlite-shm
 *.blobs/
+artifacts/
+*.user
+.vs/
+__pycache__/
+.claude/
+.dalamud/
