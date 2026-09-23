@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/linkpearl-core", "crates/linkpearl-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Johnneylee Jack Rollins <git@spacegho.st>"]
+repository = "https://github.com/Spaceghost/ffxiv-linkpearl"
+
+[workspace.dependencies]
+iroh = "1.2"
+iroh-gossip = "0.101"
+iroh-blobs = "0.103"
+n0-future = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+bytes = "1"
+data-encoding = "2"
+blake3 = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+anyhow = "1"
+tracing = "0.1"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 1
+strip = true

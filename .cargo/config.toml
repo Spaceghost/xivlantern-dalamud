@@ -1,0 +1,12 @@
+# Windows x64 cross-build from Linux.
+#
+# The mingw-w64 toolchain, not MSVC: the Ghostty plugin core is built with
+# `zig cc -target x86_64-windows-gnu`, so a GNU-ABI DLL drops straight in, and
+# the Dalamud side resolves exports with GetProcAddress either way.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+
+[env]
+CC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-gcc"
+AR_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-ar"

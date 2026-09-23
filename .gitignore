@@ -1,0 +1,7 @@
+/target/
+bin/
+obj/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.blobs/
