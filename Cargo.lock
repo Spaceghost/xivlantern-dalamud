@@ -1852,6 +1852,7 @@ dependencies = [
  "blake3",
  "bytes",
  "data-encoding",
+ "getrandom 0.4.3",
  "iroh",
  "iroh-blobs",
  "iroh-gossip",
@@ -1870,6 +1871,7 @@ version = "0.1.0"
 dependencies = [
  "data-encoding",
  "linkpearl-core",
+ "tempfile",
 ]
 
 [[package]]

@@ -164,10 +164,99 @@ impl FromStr for NodeTicket {
     }
 }
 
+/// A friend invite: "here is how to reach me, and a one-time secret proving I
+/// asked you". Redeemed exactly once over the friend ALPN.
+pub const FRIEND_TICKET_PREFIX: &str = "lpfriend";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FriendInvite {
+    pub version: u16,
+    /// The inviting device.
+    pub addr: EndpointAddr,
+    /// Single-use secret. Whoever presents it first becomes the friend.
+    pub secret: [u8; 16],
+    /// The inviter's display name. Self-asserted: shown, never trusted.
+    pub name: String,
+    /// Unix seconds after which the inviter refuses it; 0 means never.
+    pub expires_at: i64,
+    /// The inviter's nostr public key (x-only, 32 bytes), when they use one.
+    /// Carried now so the ticket format does not change when nostr lands.
+    pub nostr: Option<[u8; 32]>,
+}
+
+impl FriendInvite {
+    pub fn is_expired(&self, now_secs: i64) -> bool {
+        self.expires_at != 0 && now_secs >= self.expires_at
+    }
+}
+
+impl fmt::Display for FriendInvite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = postcard::to_stdvec(self).expect("infallible");
+        let mut text = data_encoding::BASE32_NOPAD.encode(&bytes);
+        text.make_ascii_lowercase();
+        write!(f, "{FRIEND_TICKET_PREFIX}{text}")
+    }
+}
+
+impl FromStr for FriendInvite {
+    type Err = Error;
+
+    fn from_str(s: &str) -> crate::Result<Self> {
+        let s = s.trim();
+        let body = s.strip_prefix(FRIEND_TICKET_PREFIX).ok_or(Error::Ticket)?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(body.to_ascii_uppercase().as_bytes())
+            .map_err(|_| Error::Ticket)?;
+        let t: FriendInvite = postcard::from_bytes(&bytes).map_err(|_| Error::Ticket)?;
+        if t.version != PROTOCOL_VERSION {
+            return Err(Error::Ticket);
+        }
+        Ok(t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iroh::SecretKey;
+
+    #[test]
+    fn friend_invites_round_trip_and_are_not_other_tickets() {
+        let invite = FriendInvite {
+            version: PROTOCOL_VERSION,
+            addr: addr(),
+            secret: [9u8; 16],
+            name: "Alice Ultros".into(),
+            expires_at: 1_900_000_000,
+            nostr: Some([3u8; 32]),
+        };
+        let text = invite.to_string();
+        assert!(text.starts_with(FRIEND_TICKET_PREFIX));
+        assert!(text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert_eq!(FriendInvite::from_str(&text).unwrap(), invite);
+        // "lpfriend" does not start with "lproom" or "lpnode", and vice versa.
+        assert!(RoomTicket::from_str(&text).is_err());
+        assert!(NodeTicket::from_str(&text).is_err());
+        assert!(FriendInvite::from_str(&NodeTicket::new(addr()).to_string()).is_err());
+        assert!(FriendInvite::from_str("lpfriendzzzz").is_err());
+    }
+
+    #[test]
+    fn friend_invite_expiry() {
+        let mut invite = FriendInvite {
+            version: PROTOCOL_VERSION,
+            addr: addr(),
+            secret: [0u8; 16],
+            name: String::new(),
+            expires_at: 0,
+            nostr: None,
+        };
+        assert!(!invite.is_expired(i64::MAX), "0 never expires");
+        invite.expires_at = 100;
+        assert!(!invite.is_expired(99));
+        assert!(invite.is_expired(100));
+    }
 
     fn addr() -> EndpointAddr {
         EndpointAddr::from(SecretKey::generate().public())

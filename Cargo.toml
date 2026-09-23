@@ -22,6 +22,7 @@ bytes = "1"
 data-encoding = "2"
 blake3 = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
+getrandom = "0.4"
 anyhow = "1"
 tracing = "0.1"
 

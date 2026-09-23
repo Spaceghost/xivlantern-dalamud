@@ -19,12 +19,11 @@ use std::{
     sync::Mutex,
 };
 
-use linkpearl_core::{
-    event::Event, Config, Error, Node, RelayMode, Scope,
-};
+use linkpearl_core::{event::Event, Config, Error, Node, RelayMode, Scope, Status};
 
 pub const LP_ABI_VERSION: u32 = 1;
 pub const LP_NODE_ID_LEN: usize = 32;
+pub const LP_MAX_TEXT: usize = 4096;
 
 // --------------------------------------------------------------- status codes
 
@@ -77,6 +76,21 @@ pub const LP_EV_TICKET: u32 = 15;
 pub const LP_EV_PUBLISHING: u32 = 16;
 pub const LP_EV_ERROR: u32 = 17;
 pub const LP_EV_LOG: u32 = 18;
+pub const LP_EV_FRIEND_ADDED: u32 = 19;
+pub const LP_EV_FRIEND_REMOVED: u32 = 20;
+pub const LP_EV_INVITE_FAILED: u32 = 21;
+pub const LP_EV_FRIEND_ONLINE: u32 = 22;
+pub const LP_EV_FRIEND_OFFLINE: u32 = 23;
+pub const LP_EV_FRIEND_TEXT: u32 = 24;
+pub const LP_EV_FRIEND_DELIVERED: u32 = 25;
+pub const LP_EV_CHANNEL_INVITE: u32 = 26;
+
+// ------------------------------------------------------------ presence status
+
+pub const LP_PRESENCE_INVISIBLE: u32 = 0;
+pub const LP_PRESENCE_ONLINE: u32 = 1;
+pub const LP_PRESENCE_AWAY: u32 = 2;
+pub const LP_PRESENCE_BUSY: u32 = 3;
 
 // -------------------------------------------------------------------- structs
 
@@ -284,6 +298,7 @@ pub unsafe extern "C" fn lp_node_open(cfg: *const lp_config, out_node: *mut *mut
                 cfg.event_queue_cap as usize
             },
             accept_inbound: cfg.accept_inbound != 0,
+            ..Config::default()
         };
 
         match Node::open(config) {
@@ -518,6 +533,50 @@ pub unsafe extern "C" fn lp_poll(
                 Event::Log { message } => {
                     slot.kind = LP_EV_LOG;
                     Some(message.into_bytes())
+                }
+                Event::FriendAdded { handle, peer, name } => {
+                    slot.kind = LP_EV_FRIEND_ADDED;
+                    slot.handle = handle;
+                    slot.peer = peer;
+                    Some(name.into_bytes())
+                }
+                Event::FriendRemoved { peer } => {
+                    slot.kind = LP_EV_FRIEND_REMOVED;
+                    slot.peer = peer;
+                    None
+                }
+                Event::InviteFailed { handle, reason } => {
+                    slot.kind = LP_EV_INVITE_FAILED;
+                    slot.handle = handle;
+                    Some(reason.into_bytes())
+                }
+                Event::FriendOnline { peer, status, note } => {
+                    slot.kind = LP_EV_FRIEND_ONLINE;
+                    slot.handle = status as u64;
+                    slot.peer = peer;
+                    Some(note.into_bytes())
+                }
+                Event::FriendOffline { peer } => {
+                    slot.kind = LP_EV_FRIEND_OFFLINE;
+                    slot.peer = peer;
+                    None
+                }
+                Event::FriendText { peer, id, text, .. } => {
+                    slot.kind = LP_EV_FRIEND_TEXT;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    Some(text.into_bytes())
+                }
+                Event::FriendDelivered { peer, id } => {
+                    slot.kind = LP_EV_FRIEND_DELIVERED;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    None
+                }
+                Event::ChannelInvite { peer, ticket } => {
+                    slot.kind = LP_EV_CHANNEL_INVITE;
+                    slot.peer = peer;
+                    Some(ticket.into_bytes())
                 }
             };
             if let Some(bytes) = payload {
@@ -1015,6 +1074,275 @@ pub unsafe extern "C" fn lp_bookmark_list(
     })
 }
 
+// -------------------------------------------------------------------- friends
+
+unsafe fn peer_of(p: *const u8) -> Option<[u8; LP_NODE_ID_LEN]> {
+    if p.is_null() {
+        return None;
+    }
+    let mut out = [0u8; LP_NODE_ID_LEN];
+    ptr::copy_nonoverlapping(p, out.as_mut_ptr(), LP_NODE_ID_LEN);
+    Some(out)
+}
+
+/// # Safety
+/// `name` must be NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_profile_set_name(node: *mut lp_node, name: *const c_char) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        match req_str(name) {
+            Ok(name) => node
+                .node
+                .set_display_name(name)
+                .map_or_else(|e| status_of(&e), |_| LP_OK),
+            Err(e) => e,
+        }
+    })
+}
+
+/// # Safety
+/// `note` may be NULL (no note) or NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_presence_status_set(
+    node: *mut lp_node,
+    status: u32,
+    note: *const c_char,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(status) = Status::from_u32(status) else {
+            return LP_E_ARG;
+        };
+        let note = match opt_str(note) {
+            Ok(v) => v.unwrap_or(""),
+            Err(e) => return e,
+        };
+        node.node
+            .set_presence(status, note)
+            .map_or_else(|e| status_of(&e), |_| LP_OK)
+    })
+}
+
+/// # Safety
+/// See the buffer contract in the header. The invite only becomes redeemable
+/// once it has been written out, so a too-small buffer mints nothing.
+#[no_mangle]
+pub unsafe extern "C" fn lp_invite_create(
+    node: *mut lp_node,
+    ttl_secs: u32,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let ttl = (ttl_secs != 0).then(|| std::time::Duration::from_secs(ttl_secs as u64));
+        let prepared = match node.node.invite_prepare(ttl) {
+            Ok(p) => p,
+            Err(e) => return status_of(&e),
+        };
+        let needed = prepared.text().len();
+        if buf.is_null() || buf_len < needed + 1 {
+            if !out_len.is_null() {
+                *out_len = needed;
+            }
+            return LP_E_BUFFER;
+        }
+        match node.node.invite_commit(prepared) {
+            Ok(text) => write_text(&text, buf, buf_len, out_len),
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `ticket` must be NUL-terminated UTF-8; `out_handle` writable.
+#[no_mangle]
+pub unsafe extern "C" fn lp_invite_accept(
+    node: *mut lp_node,
+    ticket: *const c_char,
+    out_handle: *mut u64,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if out_handle.is_null() {
+            return LP_E_ARG;
+        }
+        *out_handle = 0;
+        let ticket = match req_str(ticket) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        match node.node.invite_accept(ticket) {
+            Ok(handle) => {
+                *out_handle = handle;
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// See the buffer contract in the header.
+#[no_mangle]
+pub unsafe extern "C" fn lp_friend_list(
+    node: *mut lp_node,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> lp_status {
+    guard(|| match node_ref(node) {
+        Ok(n) => write_text(&n.node.friends_json(), buf, buf_len, out_len),
+        Err(e) => e,
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes; `text` to `len` bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_friend_send(
+    node: *mut lp_node,
+    peer: *const u8,
+    text: *const u8,
+    len: u32,
+    out_msg: *mut u64,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if !out_msg.is_null() {
+            *out_msg = 0;
+        }
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        let Some(bytes) = slice_of(text, len) else {
+            return LP_E_ARG;
+        };
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            return LP_E_ARG;
+        };
+        match node.node.friend_send(&peer, text) {
+            Ok(id) => {
+                if !out_msg.is_null() {
+                    *out_msg = id;
+                }
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lp_friend_remove(node: *mut lp_node, peer: *const u8) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        node.node
+            .friend_remove(&peer)
+            .map_or_else(|e| status_of(&e), |_| LP_OK)
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes; see the buffer contract in the header.
+#[no_mangle]
+pub unsafe extern "C" fn lp_friend_history(
+    node: *mut lp_node,
+    peer: *const u8,
+    limit: u32,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        match node.node.friend_history_json(&peer, limit) {
+            Ok(json) => write_text(&json, buf, buf_len, out_len),
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `label` may be NULL or NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_channel_create(
+    node: *mut lp_node,
+    label: *const c_char,
+    out_room: *mut u64,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if out_room.is_null() {
+            return LP_E_ARG;
+        }
+        *out_room = 0;
+        let label = match opt_str(label) {
+            Ok(v) => v.unwrap_or(""),
+            Err(e) => return e,
+        };
+        match node.node.channel_create(label) {
+            Ok(room) => {
+                *out_room = room;
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lp_channel_invite(node: *mut lp_node, peer: *const u8, room: u64) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        node.node
+            .channel_invite(&peer, room)
+            .map_or_else(|e| status_of(&e), |_| LP_OK)
+    })
+}
+
 // ------------------------------------------------------------------ utilities
 
 /// # Safety
@@ -1159,6 +1487,71 @@ mod tests {
             LP_OK
         );
         assert_eq!(back, id);
+    }
+
+    /// `include/linkpearl.h` is written by hand. This keeps it honest: every
+    /// declared function is exported, every export is declared, and every
+    /// `LP_` constant has the same value on both sides.
+    #[test]
+    fn the_header_matches_the_exports_and_constants() {
+        use std::collections::BTreeMap;
+        let header = include_str!("../../../include/linkpearl.h");
+        let source = include_str!("lib.rs");
+
+        let declared: std::collections::BTreeSet<&str> = header
+            .lines()
+            .filter_map(|l| {
+                let decl = l.strip_prefix("LP_API ")?;
+                let head = &decl[..decl.find('(')?];
+                head.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .rev()
+                    .find(|w| w.starts_with("lp_"))
+            })
+            .collect();
+        let exported: std::collections::BTreeSet<&str> = source
+            .split("extern \"C\" fn ")
+            .skip(1)
+            .filter_map(|rest| rest.split('(').next())
+            .filter(|name| name.starts_with("lp_"))
+            .collect();
+        assert_eq!(declared, exported, "header declarations vs #[no_mangle] exports");
+
+        let header_defines: BTreeMap<&str, i64> = header
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.strip_prefix("#define ")?.split_whitespace();
+                let name = w.next()?;
+                let value = w.next()?.parse().ok()?;
+                name.starts_with("LP_").then_some((name, value))
+            })
+            .collect();
+        let rust_consts: BTreeMap<&str, i64> = source
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix("pub const ")?;
+                let (name, rest) = rest.split_once(':')?;
+                let value = rest.split_once('=')?.1.trim().trim_end_matches(';').parse().ok()?;
+                Some((name, value))
+            })
+            .collect();
+        for (name, value) in &rust_consts {
+            assert_eq!(header_defines.get(name), Some(value), "{name} differs or is missing in the header");
+        }
+        for name in header_defines.keys() {
+            let covered = ["LP_EV_", "LP_E_", "LP_OK", "LP_PRESENCE_"]
+                .iter()
+                .any(|p| name.starts_with(p));
+            if covered {
+                assert!(rust_consts.contains_key(name), "{name} is in the header but not in lib.rs");
+            }
+        }
+        assert_eq!(
+            header_defines["LP_MAX_MESSAGE"],
+            linkpearl_core::MAX_MESSAGE as i64,
+            "LP_MAX_MESSAGE"
+        );
+        assert_eq!(header_defines["LP_SCOPE_CUSTOM"], Scope::Custom as i64);
+        assert_eq!(header_defines["LP_RELAY_DISABLED"], 1);
     }
 
     #[test]

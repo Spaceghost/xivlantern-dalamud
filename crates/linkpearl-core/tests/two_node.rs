@@ -19,6 +19,7 @@ fn node(name: &str, dir: &std::path::Path) -> Node {
         relay: RelayMode::Disabled,
         event_queue_cap: 1024,
         accept_inbound: true,
+        ..Config::default()
     };
     Node::open(config).expect("node must open")
 }
@@ -27,13 +28,21 @@ fn node(name: &str, dir: &std::path::Path) -> Node {
 ///
 /// Every event is handed to the predicate and also accumulated, so a test can
 /// assert on what happened *and* fail with the whole transcript.
+///
+/// Every polled event goes into a per-node backlog and `wait` removes only the
+/// event it matched, so an event polled before anyone asked for it (or in the
+/// same batch as another match) is not lost.
 struct Pump {
     log: Vec<(usize, Event)>,
+    pending: [std::collections::VecDeque<Event>; 2],
 }
 
 impl Pump {
     fn new() -> Self {
-        Pump { log: Vec::new() }
+        Pump {
+            log: Vec::new(),
+            pending: Default::default(),
+        }
     }
 
     fn wait<F>(&mut self, nodes: [&Node; 2], what: &str, secs: u64, mut pred: F) -> Event
@@ -43,12 +52,11 @@ impl Pump {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
             for (i, n) in nodes.iter().enumerate() {
-                for event in n.poll(64) {
-                    let hit = pred(i, &event);
-                    self.log.push((i, event.clone()));
-                    if hit {
-                        return event;
-                    }
+                let fresh = n.poll(64);
+                self.log.extend(fresh.iter().cloned().map(|e| (i, e)));
+                self.pending[i].extend(fresh);
+                if let Some(pos) = self.pending[i].iter().position(|e| pred(i, e)) {
+                    return self.pending[i].remove(pos).unwrap();
                 }
             }
             if Instant::now() > deadline {
