@@ -45,12 +45,14 @@ internal struct LpStats
     public uint RelayedConns;
     public uint PublishingRooms;
     public uint EventsDropped;
+    public uint RateLimited;
+    public uint Reserved;
 }
 
 internal static unsafe class Native
 {
     /// <summary>The ABI this binding was generated against.</summary>
-    public const uint AbiVersion = 1;
+    public const uint AbiVersion = 2;
 
     public const int NodeIdLen = 32;
 
@@ -97,6 +99,15 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int> FriendHistory;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> ChannelCreate;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong, int> ChannelInvite;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> Block;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> Unblock;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> BlockedList;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> AddressHint;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, uint, int> SupportContactsSet;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int> SupportSend;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int> AuthorJoin;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int> Announcements;
+    public static delegate* unmanaged[Cdecl]<nint, ulong*, int> SelfTest;
 
     /// <summary>
     /// The file name to look for in the plugin folder. Dalamud loads the managed
@@ -163,6 +174,15 @@ internal static unsafe class Native
             FriendHistory = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_friend_history");
             ChannelCreate = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lp_channel_create");
             ChannelInvite = (delegate* unmanaged[Cdecl]<nint, byte*, ulong, int>)NativeLibrary.GetExport(lib, "lp_channel_invite");
+            Block = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_block");
+            Unblock = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_unblock");
+            BlockedList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_blocked_list");
+            AddressHint = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lp_address_hint");
+            SupportContactsSet = (delegate* unmanaged[Cdecl]<nint, byte*, uint, int>)NativeLibrary.GetExport(lib, "lp_support_contacts_set");
+            SupportSend = (delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int>)NativeLibrary.GetExport(lib, "lp_support_send");
+            AuthorJoin = (delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int>)NativeLibrary.GetExport(lib, "lp_author_join");
+            Announcements = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lp_announcements");
+            SelfTest = (delegate* unmanaged[Cdecl]<nint, ulong*, int>)NativeLibrary.GetExport(lib, "lp_selftest");
 
             library = lib;
         }

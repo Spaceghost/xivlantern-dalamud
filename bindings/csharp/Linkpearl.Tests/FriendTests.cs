@@ -103,4 +103,32 @@ public sealed class FriendTests : IDisposable
         Assert.Contains("hello from C#", alice.FriendHistoryJson(bobId));
         Assert.Throws<ArgumentException>(() => alice.FriendSend(new byte[3], "x"));
     }
+
+    [Fact]
+    public void SelfTestBlockAndAuthorChannelThroughTheBinding()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(NativeDir), "LINKPEARL_NATIVE_DIR is not set");
+
+        using var alice = Open("Alice2");
+        using var bob = Open("Bob2");
+        ulong handle = alice.SelfTest();
+        var report = Wait(alice, "selftest", e => e.Kind == LinkpearlEventKind.SelfTest && e.Handle == handle);
+        Assert.Contains("\"direct\":{\"ok\":true", report.Text);
+
+        byte[] bobId = bob.NodeId();
+        alice.Block(bobId);
+        Assert.Contains(Convert.ToHexStringLower(bobId), alice.BlockedJson());
+        Assert.True(alice.Unblock(bobId));
+        Assert.False(alice.Unblock(bobId));
+
+        byte[] author = bob.NodeId(); // any valid ed25519 public key will do
+        ulong room = alice.AuthorJoin(author, [bobId]);
+        Assert.Equal(room, alice.AuthorJoin(author, [bobId]));
+        Assert.Equal("[]", alice.AnnouncementsJson(author));
+        Assert.Throws<LinkpearlException>(() => alice.RoomSend(room, "chatter"));
+        alice.SetSupportContacts([bobId]);
+        alice.SetSupportContacts([]);
+        Assert.Throws<LinkpearlException>(() => alice.SupportSend(bobId, "hi"));
+        Assert.Equal(0u, alice.Stats().RateLimited);
+    }
 }

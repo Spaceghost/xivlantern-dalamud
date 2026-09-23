@@ -55,7 +55,7 @@ extern "C" {
 #  define LP_API
 #endif
 
-#define LP_ABI_VERSION 1
+#define LP_ABI_VERSION 2   /* 2: lp_stats grew rate_limited; friends, author, selftest */
 
 /* Sizes the caller can rely on. */
 #define LP_NODE_ID_LEN 32   /* raw ed25519 public key bytes */
@@ -78,8 +78,12 @@ typedef int32_t lp_status;
 #define LP_E_ABI         -10  /* caller/library ABI mismatch */
 #define LP_E_INTERNAL    -99
 
-/* Largest single room/direct message. Bigger payloads belong in a blob. */
+/* Largest single direct-connection message. Bigger payloads belong in a blob. */
 #define LP_MAX_MESSAGE 61440 /* 60 KiB */
+/* Largest room/channel message or presence payload. */
+#define LP_MAX_ROOM_MESSAGE 6144
+/* Largest 1:1 text or support message, in UTF-8 bytes. */
+#define LP_MAX_CHAT 2048
 
 /* ---------------------------------------------------------------- config --- */
 
@@ -148,6 +152,15 @@ typedef uint64_t lp_blob;
                                      per message even when the sender retried */
 #define LP_EV_FRIEND_DELIVERED 25 /* handle = id from lp_friend_send: they have it */
 #define LP_EV_CHANNEL_INVITE   26 /* data = room ticket; join with lp_room_join */
+#define LP_EV_RATE_LIMITED     27 /* peer's frames are being dropped; data = "friend",
+                                     "room" or "stranger". At most every 30 s per peer */
+#define LP_EV_ANNOUNCEMENT     28 /* verified author announcement: handle = room, peer =
+                                     author key, data = {"seq","issued_at","title","body"} */
+#define LP_EV_SUPPORT_MESSAGE  29 /* author mode only: handle = id, data = text */
+#define LP_EV_SUPPORT_REPLY    30 /* a support contact answered: handle = id, data = text */
+#define LP_EV_SUPPORT_DELIVERED 31 /* handle = id from lp_support_send */
+#define LP_EV_SUPPORT_FAILED   32 /* handle = id; data = reason. Not retried */
+#define LP_EV_SELFTEST         33 /* handle = lp_selftest handle; data = JSON report */
 
 typedef struct lp_event {
     uint32_t       kind;                    /* LP_EV_* */
@@ -169,6 +182,8 @@ typedef struct lp_stats {
     uint32_t relayed_conns;    /* connections currently going through a relay */
     uint32_t publishing_rooms; /* rooms this node is actively publishing into */
     uint32_t events_dropped;   /* event queue overflow count since open */
+    uint32_t rate_limited;     /* frames dropped by per-peer rate limits since open */
+    uint32_t reserved;
 } lp_stats;
 
 /* ------------------------------------------------------------- lifecycle --- */
@@ -339,6 +354,55 @@ LP_API lp_status lp_channel_create(lp_node *node, const char *label, lp_room *ou
 /* Send a linked friend this room's ticket; they get LP_EV_CHANNEL_INVITE. */
 LP_API lp_status lp_channel_invite(lp_node *node, const uint8_t peer[LP_NODE_ID_LEN],
                                    lp_room room);
+
+/* --------------------------------------------------------------- safety --- */
+
+/* Block a node: dropped from friends without telling them, link closed, and
+ * from then on their connections, room messages and invites are refused.
+ * Persisted. */
+LP_API lp_status lp_block(lp_node *node, const uint8_t peer[LP_NODE_ID_LEN]);
+LP_API lp_status lp_unblock(lp_node *node, const uint8_t peer[LP_NODE_ID_LEN]);
+/* JSON array of hex node ids. */
+LP_API lp_status lp_blocked_list(lp_node *node, char *buf, size_t buf_len, size_t *out_len);
+
+/* Remember where a node can be reached (an lpnode... ticket), so dialing it by
+ * id works with relays off. */
+LP_API lp_status lp_address_hint(lp_node *node, const char *node_ticket);
+
+/* ------------------------------------------------------- author channel --- */
+
+/* Join the author channel of `author` (an ed25519 public key; the private key
+ * never ships). `bootstrap` holds `count` node ids of the author's always-on
+ * nodes. Only announcements the author key signed come out of it, as
+ * LP_EV_ANNOUNCEMENT; lp_room_send refuses it. Joining twice returns the same
+ * room. */
+LP_API lp_status lp_author_join(lp_node *node, const uint8_t author[LP_NODE_ID_LEN],
+                                const uint8_t *bootstrap, uint32_t count,
+                                lp_room *out_room);
+
+/* Kept announcements, newest first, as JSON
+ * [{"seq":..,"issued_at":<unix s>,"title":"..","body":".."}]. Reads SQLite. */
+LP_API lp_status lp_announcements(lp_node *node, const uint8_t author[LP_NODE_ID_LEN],
+                                  uint32_t limit, char *buf, size_t buf_len,
+                                  size_t *out_len);
+
+/* The nodes allowed to answer support messages (the author's). Replaces the
+ * previous set; at most 64. */
+LP_API lp_status lp_support_contacts_set(lp_node *node, const uint8_t *peers, uint32_t count);
+
+/* Write to a support contact (UTF-8, at most LP_MAX_CHAT). Not queued:
+ * LP_EV_SUPPORT_DELIVERED or LP_EV_SUPPORT_FAILED follows. */
+LP_API lp_status lp_support_send(lp_node *node, const uint8_t peer[LP_NODE_ID_LEN],
+                                 const uint8_t *text, uint32_t len, uint64_t *out_msg);
+
+/* ------------------------------------------------------------- selftest --- */
+
+/* Is this node reachable, in this process, now? Dials itself directly with a
+ * throwaway endpoint, and through its home relay unless relays are off.
+ * LP_EV_SELFTEST carries a JSON report:
+ * {"node_id","platform","bound":[..],"relay_url",
+ *  "direct":{"ok","ms","detail"},"relay":{"ok","ms","detail"}} */
+LP_API lp_status lp_selftest(lp_node *node, uint64_t *out_handle);
 
 /* ----------------------------------------------------------- bookmarks ---- */
 

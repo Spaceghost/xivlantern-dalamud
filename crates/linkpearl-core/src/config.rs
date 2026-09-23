@@ -45,6 +45,10 @@ pub struct Config {
     /// one, so a stored friend address stays valid across restarts on a LAN
     /// with no relay. `None` lets iroh choose.
     pub bind_port: Option<u16>,
+    /// Author mode: accept support messages from nodes that are not friends
+    /// (rate limited). Only the mod author's own node turns this on; a player's
+    /// never does.
+    pub accept_support: bool,
 }
 
 impl Default for Config {
@@ -58,6 +62,7 @@ impl Default for Config {
             accept_inbound: true,
             heartbeat_ms: 15_000,
             bind_port: None,
+            accept_support: false,
         }
     }
 }
@@ -78,5 +83,10 @@ impl Config {
     /// The ALPN friend links speak: invites, presence, 1:1 text.
     pub fn friend_alpn(&self) -> Vec<u8> {
         format!("{}/friend/1", self.app_id).into_bytes()
+    }
+
+    /// The ALPN `selftest` dials this node on; it only accepts and waits.
+    pub fn selftest_alpn(&self) -> Vec<u8> {
+        format!("{}/selftest/1", self.app_id).into_bytes()
     }
 }

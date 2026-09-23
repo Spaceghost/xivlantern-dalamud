@@ -40,6 +40,19 @@ public enum LinkpearlEventKind : uint
     FriendDelivered = 25,
     /// <summary>Text = a room ticket for <see cref="LinkpearlNode.RoomJoin"/>.</summary>
     ChannelInvite = 26,
+    /// <summary>A peer's frames are being dropped; Text = "friend", "room" or "stranger".</summary>
+    RateLimited = 27,
+    /// <summary>A verified author announcement: Handle = room, Peer = author key, Text = JSON.</summary>
+    Announcement = 28,
+    /// <summary>Author mode only.</summary>
+    SupportMessage = 29,
+    /// <summary>The author answered: Handle = id, Text = the answer.</summary>
+    SupportReply = 30,
+    SupportDelivered = 31,
+    /// <summary>Handle = id, Text = reason. Not retried.</summary>
+    SupportFailed = 32,
+    /// <summary>Handle = the SelfTest() handle; Text = JSON report.</summary>
+    SelfTest = 33,
 }
 
 public enum PresenceStatus : uint
@@ -87,4 +100,5 @@ public readonly record struct LinkpearlStats(
     uint DirectConnections,
     uint RelayedConnections,
     uint PublishingRooms,
-    uint EventsDropped);
+    uint EventsDropped,
+    uint RateLimited);

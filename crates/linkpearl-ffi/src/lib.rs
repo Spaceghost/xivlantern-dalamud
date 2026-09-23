@@ -21,9 +21,12 @@ use std::{
 
 use linkpearl_core::{event::Event, Config, Error, Node, RelayMode, Scope, Status};
 
-pub const LP_ABI_VERSION: u32 = 1;
+pub const LP_ABI_VERSION: u32 = 2;
 pub const LP_NODE_ID_LEN: usize = 32;
 pub const LP_MAX_TEXT: usize = 4096;
+pub const LP_MAX_MESSAGE: usize = 61440;
+pub const LP_MAX_ROOM_MESSAGE: usize = 6144;
+pub const LP_MAX_CHAT: usize = 2048;
 
 // --------------------------------------------------------------- status codes
 
@@ -84,6 +87,13 @@ pub const LP_EV_FRIEND_OFFLINE: u32 = 23;
 pub const LP_EV_FRIEND_TEXT: u32 = 24;
 pub const LP_EV_FRIEND_DELIVERED: u32 = 25;
 pub const LP_EV_CHANNEL_INVITE: u32 = 26;
+pub const LP_EV_RATE_LIMITED: u32 = 27;
+pub const LP_EV_ANNOUNCEMENT: u32 = 28;
+pub const LP_EV_SUPPORT_MESSAGE: u32 = 29;
+pub const LP_EV_SUPPORT_REPLY: u32 = 30;
+pub const LP_EV_SUPPORT_DELIVERED: u32 = 31;
+pub const LP_EV_SUPPORT_FAILED: u32 = 32;
+pub const LP_EV_SELFTEST: u32 = 33;
 
 // ------------------------------------------------------------ presence status
 
@@ -127,6 +137,8 @@ pub struct lp_stats {
     pub relayed_conns: u32,
     pub publishing_rooms: u32,
     pub events_dropped: u32,
+    pub rate_limited: u32,
+    pub _reserved: u32,
 }
 
 /// The opaque handle the header calls `lp_node`.
@@ -594,6 +606,60 @@ pub unsafe extern "C" fn lp_poll(
                     slot.handle = handle;
                     Some(format!("nostr: {} devices", devices.len()).into_bytes())
                 }
+                Event::RateLimited { peer, what } => {
+                    slot.kind = LP_EV_RATE_LIMITED;
+                    slot.peer = peer;
+                    Some(what.into_bytes())
+                }
+                Event::Announcement {
+                    room,
+                    author,
+                    seq,
+                    issued_at,
+                    title,
+                    body,
+                } => {
+                    slot.kind = LP_EV_ANNOUNCEMENT;
+                    slot.handle = room;
+                    slot.peer = author;
+                    Some(
+                        format!(
+                            "{{\"seq\":{seq},\"issued_at\":{issued_at},\"title\":\"{}\",\"body\":\"{}\"}}",
+                            json_escape(&title),
+                            json_escape(&body)
+                        )
+                        .into_bytes(),
+                    )
+                }
+                Event::SupportMessage { peer, id, text, .. } => {
+                    slot.kind = LP_EV_SUPPORT_MESSAGE;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    Some(text.into_bytes())
+                }
+                Event::SupportReply { peer, id, text, .. } => {
+                    slot.kind = LP_EV_SUPPORT_REPLY;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    Some(text.into_bytes())
+                }
+                Event::SupportDelivered { peer, id } => {
+                    slot.kind = LP_EV_SUPPORT_DELIVERED;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    None
+                }
+                Event::SupportFailed { peer, id, reason } => {
+                    slot.kind = LP_EV_SUPPORT_FAILED;
+                    slot.handle = id;
+                    slot.peer = peer;
+                    Some(reason.into_bytes())
+                }
+                Event::SelfTest { handle, report } => {
+                    slot.kind = LP_EV_SELFTEST;
+                    slot.handle = handle;
+                    Some(report.into_bytes())
+                }
                 // Call signalling is a spike behind the `calls` feature and not
                 // in the C ABI.
                 Event::CallIncoming { call, .. }
@@ -638,6 +704,8 @@ pub unsafe extern "C" fn lp_stats_get(node: *mut lp_node, out_stats: *mut lp_sta
             relayed_conns: s.relayed_conns,
             publishing_rooms: s.publishing_rooms,
             events_dropped: s.events_dropped,
+            rate_limited: s.rate_limited,
+            _reserved: 0,
         };
         LP_OK
     })
@@ -1368,6 +1436,222 @@ pub unsafe extern "C" fn lp_channel_invite(node: *mut lp_node, peer: *const u8, 
     })
 }
 
+// --------------------------------------------------------------------- safety
+
+/// # Safety
+/// `peer` must point to 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lp_block(node: *mut lp_node, peer: *const u8) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        node.node.block(&peer).map_or_else(|e| status_of(&e), |_| LP_OK)
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lp_unblock(node: *mut lp_node, peer: *const u8) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        node.node.unblock(&peer).map_or_else(|e| status_of(&e), |_| LP_OK)
+    })
+}
+
+/// # Safety
+/// See the buffer contract in the header.
+#[no_mangle]
+pub unsafe extern "C" fn lp_blocked_list(
+    node: *mut lp_node,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> lp_status {
+    guard(|| match node_ref(node) {
+        Ok(n) => write_text(&n.node.blocked_json(), buf, buf_len, out_len),
+        Err(e) => e,
+    })
+}
+
+/// # Safety
+/// `ticket` must be NUL-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_address_hint(node: *mut lp_node, ticket: *const c_char) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        match req_str(ticket) {
+            Ok(t) => node.node.add_address_hint(t).map_or_else(|e| status_of(&e), |_| LP_OK),
+            Err(e) => e,
+        }
+    })
+}
+
+unsafe fn peers_of(p: *const u8, count: u32) -> Option<Vec<[u8; LP_NODE_ID_LEN]>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    if p.is_null() || count > 64 {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(p, count as usize * LP_NODE_ID_LEN);
+    Some(
+        bytes
+            .chunks_exact(LP_NODE_ID_LEN)
+            .map(|c| c.try_into().expect("chunks_exact"))
+            .collect(),
+    )
+}
+
+// ------------------------------------------------------------- author, support
+
+/// # Safety
+/// `peers` must point to `count * 32` bytes (NULL when count is 0).
+#[no_mangle]
+pub unsafe extern "C" fn lp_support_contacts_set(node: *mut lp_node, peers: *const u8, count: u32) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(peers) = peers_of(peers, count) else {
+            return LP_E_ARG;
+        };
+        node.node.set_support_contacts(&peers);
+        LP_OK
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes; `text` to `len` bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn lp_support_send(
+    node: *mut lp_node,
+    peer: *const u8,
+    text: *const u8,
+    len: u32,
+    out_msg: *mut u64,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if !out_msg.is_null() {
+            *out_msg = 0;
+        }
+        let Some(peer) = peer_of(peer) else {
+            return LP_E_ARG;
+        };
+        let Some(Ok(text)) = slice_of(text, len).map(std::str::from_utf8) else {
+            return LP_E_ARG;
+        };
+        match node.node.support_send(&peer, text) {
+            Ok(id) => {
+                if !out_msg.is_null() {
+                    *out_msg = id;
+                }
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `author` must point to 32 bytes, `bootstrap` to `count * 32` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lp_author_join(
+    node: *mut lp_node,
+    author: *const u8,
+    bootstrap: *const u8,
+    count: u32,
+    out_room: *mut u64,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if out_room.is_null() {
+            return LP_E_ARG;
+        }
+        *out_room = 0;
+        let (Some(author), Some(peers)) = (peer_of(author), peers_of(bootstrap, count)) else {
+            return LP_E_ARG;
+        };
+        match node.node.author_join(&author, &peers) {
+            Ok(room) => {
+                *out_room = room;
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `author` must point to 32 bytes; see the buffer contract in the header.
+#[no_mangle]
+pub unsafe extern "C" fn lp_announcements(
+    node: *mut lp_node,
+    author: *const u8,
+    limit: u32,
+    buf: *mut c_char,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        let Some(author) = peer_of(author) else {
+            return LP_E_ARG;
+        };
+        match node.node.announcements_json(&author, limit) {
+            Ok(json) => write_text(&json, buf, buf_len, out_len),
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
+/// # Safety
+/// `out_handle` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lp_selftest(node: *mut lp_node, out_handle: *mut u64) -> lp_status {
+    guard(|| {
+        let node = match node_ref(node) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+        if out_handle.is_null() {
+            return LP_E_ARG;
+        }
+        match node.node.selftest() {
+            Ok(h) => {
+                *out_handle = h;
+                LP_OK
+            }
+            Err(e) => status_of(&e),
+        }
+    })
+}
+
 // ------------------------------------------------------------------ utilities
 
 /// # Safety
@@ -1575,6 +1859,10 @@ mod tests {
             linkpearl_core::MAX_MESSAGE as i64,
             "LP_MAX_MESSAGE"
         );
+        assert_eq!(header_defines["LP_MAX_ROOM_MESSAGE"], linkpearl_core::MAX_ROOM_MESSAGE as i64);
+        assert_eq!(header_defines["LP_MAX_CHAT"], linkpearl_core::MAX_TEXT as i64);
+        assert_eq!(std::mem::size_of::<lp_stats>(), 48, "lp_stats layout");
+        assert_eq!(std::mem::size_of::<lp_event>(), 64, "lp_event layout");
         assert_eq!(header_defines["LP_SCOPE_CUSTOM"], Scope::Custom as i64);
         assert_eq!(header_defines["LP_RELAY_DISABLED"], 1);
     }

@@ -248,3 +248,58 @@ fn a_bad_invite_is_refused_synchronously() {
     assert_eq!(h, 0, "no handle for a refused call");
     assert_eq!(unsafe { lp_invite_accept(n.p, ptr::null(), &mut h) }, LP_E_ARG);
 }
+
+#[test]
+fn selftest_block_and_the_author_channel_through_the_c_abi() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice = open(dir.path(), "Alice");
+    let bob = open(dir.path(), "Bob");
+    let b_id = id(&bob);
+
+    // Selftest with relays off: the direct path must work in this process.
+    let mut h = 0u64;
+    assert_eq!(unsafe { lp_selftest(alice.p, &mut h) }, LP_OK);
+    let report = wait(&[&alice], "selftest", |_, e| e.kind == LP_EV_SELFTEST && e.handle == h);
+    let text = report.text();
+    assert!(text.contains("\"direct\":{\"ok\":true"), "{text}");
+    assert!(text.contains("relays are off"), "{text}");
+
+    // Block and unblock round trip.
+    assert_eq!(unsafe { lp_block(alice.p, b_id.as_ptr()) }, LP_OK);
+    let list = text_call(|b, l, n| unsafe { lp_blocked_list(alice.p, b, l, n) });
+    assert!(list.contains(&b_id.iter().map(|b| format!("{b:02x}")).collect::<String>()), "{list}");
+    assert_eq!(unsafe { lp_unblock(alice.p, b_id.as_ptr()) }, LP_OK);
+    assert_eq!(unsafe { lp_unblock(alice.p, b_id.as_ptr()) }, LP_E_NOT_FOUND);
+
+    // The author channel: joinable, idempotent, and closed to plain messages.
+    let key = iroh_key();
+    let mut none = 0u64;
+    assert_eq!(unsafe { lp_author_join(alice.p, std::ptr::null(), std::ptr::null(), 0, &mut none) }, LP_E_ARG);
+    let boot = id(&bob);
+    let (mut r1, mut r2) = (0u64, 0u64);
+    assert_eq!(unsafe { lp_author_join(alice.p, key.as_ptr(), boot.as_ptr(), 1, &mut r1) }, LP_OK);
+    assert_eq!(unsafe { lp_author_join(alice.p, key.as_ptr(), boot.as_ptr(), 1, &mut r2) }, LP_OK);
+    assert_eq!(r1, r2);
+    let line = b"hi";
+    assert_eq!(unsafe { lp_room_send(alice.p, r1, line.as_ptr(), 2) }, LP_E_STATE);
+    let json = text_call(|b, l, n| unsafe { lp_announcements(alice.p, key.as_ptr(), 5, b, l, n) });
+    assert_eq!(json, "[]");
+
+    // Support goes only to configured contacts.
+    let mut msg = 0u64;
+    assert_eq!(
+        unsafe { lp_support_send(alice.p, b_id.as_ptr(), line.as_ptr(), 2, &mut msg) },
+        LP_E_NOT_FOUND
+    );
+    assert_eq!(unsafe { lp_support_contacts_set(alice.p, b_id.as_ptr(), 1) }, LP_OK);
+    assert_eq!(unsafe { lp_support_send(alice.p, b_id.as_ptr(), line.as_ptr(), 2, &mut msg) }, LP_OK);
+    let failed = wait(&[&alice, &bob], "bob is not an author node", |i, e| {
+        i == 0 && (e.kind == LP_EV_SUPPORT_FAILED || e.kind == LP_EV_SUPPORT_DELIVERED)
+    });
+    assert_eq!(failed.kind, LP_EV_SUPPORT_FAILED);
+    assert_eq!(failed.handle, msg);
+}
+
+fn iroh_key() -> [u8; 32] {
+    *iroh::SecretKey::generate().public().as_bytes()
+}
