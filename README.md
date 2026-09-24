@@ -10,6 +10,8 @@
 
 <img src="images/icon.png" width="96" height="96" align="right" alt="XivLantern icon">
 
+**[Site](https://spacegho.st/mods/ffxiv/xivlantern/) · [Install](https://spacegho.st/mods/ffxiv/plugins/) · [Vote on what's next](https://spacegho.st/mods/ffxiv/xivlantern/vote/) · [Screenshots](https://spacegho.st/mods/ffxiv/term/gallery/?mod=xivlantern) · [Changelog](CHANGELOG.md)**
+
 Lanterns for FINAL FANTASY XIV: friends light a lantern to say they are here.
 A friend list with presence, 1:1 chat and channels, peer to peer over
 [iroh](https://www.iroh.computer/), plus an opt-in channel where the mod's
@@ -69,6 +71,18 @@ automates or sends a game action; it is a separate chat that draws in game.
 | `src/XivLantern.Plugin` | the Dalamud plugin |
 | `docs/` | design, Wine evidence, IPC, the author channel, releasing |
 
+## Install (from the plugin repository)
+
+```text
+https://spacegho.st/mods/ffxiv/plugins.json
+```
+
+1. `/xlsettings` → **Experimental** → **Custom Plugin Repositories**: add the URL, **+**, save.
+2. `/xlplugins` → **All Plugins**: search **XivLantern**.
+
+[The repository's page](https://spacegho.st/mods/ffxiv/plugins/) walks through the same steps. For a dev
+plugin, see [Building](#building).
+
 ## Building
 
 Never on the machine the game runs on. In the Incus builder:
@@ -98,5 +112,5 @@ lantern --db alice.sqlite --name Alice --relay off     # /help for commands
 ## Releasing
 
 `tools/release.sh`, the same as every one of these mods; see
-[docs/RELEASING.md](docs/RELEASING.md). The GitHub repository does not exist
-yet, so nothing has been released.
+[docs/RELEASING.md](docs/RELEASING.md). Test builds are out (the newest is on the
+[releases page](https://github.com/Spaceghost/xivlantern-dalamud/releases)); there is no stable release yet.
