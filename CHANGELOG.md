@@ -13,9 +13,9 @@ Statuses mean the same thing in every one of these mods:
 * **BETA** — merged, but not yet verified in game.
 * **SOON** — still being built.
 
-## [Unreleased] — In the workshop
+## [0.1.0] — Released 2026-09-23
 
-Merged, not in a release yet.
+BETA entries are in this release but have not been verified in game yet; they become NEW or FIX once they have been seen working.
 
 * XivLantern, a new mod: `/lantern` (or `/xivlantern`) opens your lantern. Friends light a lantern to say they are here. Add friends with a one-time invite (make one, send it privately, whoever uses it first becomes your friend; nothing is ever accepted for you), see whose lantern is lit with a status and a note you type, chat 1:1 with messages that wait and go out when your friend is next online, and make channels you invite friends into. Peer to peer over iroh: there is no Lantern server. Host tests cover all of it; none of it has been seen in game.
 * Off until you turn it on. The first screen says who can see what — friends see your node id, your typed name and status, and your IP addresses; n0's relays see your IP address and when you are online; channel members see your node id — and you choose the relays: n0's (default), your own relay URL, or relays off for LAN/direct only, which contacts no third party at all. Nothing from the game is read or sent: not your character's name, world, location or chat. A test fails the build if the plugin ever asks the game who you are.
