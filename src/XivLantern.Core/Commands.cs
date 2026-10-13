@@ -11,6 +11,8 @@ public enum Verb
     Invite,
     Accept,
     Status,
+    As,
+    Pull,
     Msg,
     Unknown,
 }
@@ -25,7 +27,7 @@ public sealed record Command(Verb Verb, string Arg = "", string Text = "")
 
     public const string Help =
         "/lantern — open or close the window. Subcommands: settings, on, off, selftest, invite (copies a friend invite), " +
-        "accept <ltfriend…>, status <online|away|busy|invisible> [note], msg <friend> <text>, help.";
+        "accept <ltfriend…>, status <online|away|busy|invisible> [note], as <preset>, pull <seconds> [channel], msg <friend> <text>, help.";
 
     public static Command Parse(string? arguments)
     {
@@ -43,9 +45,17 @@ public sealed record Command(Verb Verb, string Arg = "", string Text = "")
             "invite" => new Command(Verb.Invite, rest),
             "accept" => new Command(Verb.Accept, rest),
             "status" => ParseStatus(rest),
+            "as" => new Command(Verb.As, rest),
+            "pull" => ParsePull(rest),
             "msg" or "tell" => ParseMsg(rest),
             _ => new Command(Verb.Unknown, head),
         };
+    }
+
+    private static Command ParsePull(string rest)
+    {
+        var (seconds, channel) = Split(rest);
+        return new(Verb.Pull, seconds, channel);
     }
 
     private static Command ParseStatus(string rest)

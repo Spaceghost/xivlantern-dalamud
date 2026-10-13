@@ -19,6 +19,7 @@
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <None Update="Fixtures/preview*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <AssemblyMetadata Include="RepoRoot" Value="$(MSBuildThisFileDirectory)../.." />

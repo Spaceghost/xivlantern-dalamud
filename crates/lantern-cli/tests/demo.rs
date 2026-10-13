@@ -161,14 +161,12 @@ fn the_author_publishes_and_answers_a_player() {
 
     // A player: the author's key and node are all the plugin would embed. With
     // relays off the player also needs a hint for where that node is.
-    let mut player = Cli::start_with("Player", dir.path(), &["--author", &public, "--author-node", &author_id]);
+    let mut player = Cli::start_with("Player", dir.path(), &["--author", &public, "--author-node", &author_id, "--hint", &ticket]);
     player.expect("ready ");
-    player.send(&format!("/hint {ticket}"));
-    player.expect("noted");
 
     let signed = author_tool(&["sign", "--key", key, "--seq", "1", "--title", "Hello", "--body", "Welcome to Lantern"]);
-    // The node may not have met the player yet; announce once they are neighbours.
-    std::thread::sleep(Duration::from_secs(2));
+    // Publish without a timing sleep. If the peers are not neighbours yet,
+    // the author's retained-announcement reoffer must deliver on join.
     author.send(&format!("/announce {}", signed.trim()));
     author.expect("announcement #1 published");
     player.expect("[author, verified] #1 Hello");
@@ -197,4 +195,27 @@ fn the_author_publishes_and_answers_a_player() {
     author.send("/quit");
     player.expect("bye");
     author.expect("bye");
+}
+
+#[test]
+fn signed_file_handoff_verifies_before_open_and_reoffers_to_later_player() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("file-author.key"); let key = key.to_str().unwrap();
+    author_tool(&["keygen", "--key", key]);
+    let public = author_tool(&["pubkey", "--key", key]).trim().to_string();
+    let signed = author_tool(&["sign", "--key", key, "--seq", "1", "--title", "Release news", "--body", "Verified file handoff"]);
+    let file = dir.path().join("announcement.ltannounce"); std::fs::write(&file, signed).unwrap();
+    let file = file.to_str().unwrap();
+    let refused_db = dir.path().join("refused.sqlite");
+    let refused = Command::new(env!("CARGO_BIN_EXE_lantern"))
+        .args(["--db", refused_db.to_str().unwrap(), "--relay", "off", "--author-mode", &"0".repeat(64), "--announce-file", file])
+        .output().unwrap();
+    assert!(!refused.status.success()); assert!(!refused_db.exists(), "invalid author is refused before opening SQLite/network");
+    let mut author = Cli::start_with("FileAuthor", dir.path(), &["--author-mode", &public, "--announce-file", file]);
+    author.expect("announcement #1 queued from verified file");
+    let ticket = author.expect("ltnode").trim().to_string();
+    let id = author.expect("ready ").split_whitespace().nth(1).unwrap().to_string();
+    let mut player = Cli::start_with("FilePlayer", dir.path(), &["--author", &public, "--author-node", &id, "--hint", &ticket]);
+    player.expect("[author, verified] #1 Release news"); player.expect("Verified file handoff");
+    player.send("/quit"); author.send("/quit"); player.expect("bye"); author.expect("bye");
 }

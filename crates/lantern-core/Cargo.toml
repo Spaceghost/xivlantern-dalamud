@@ -25,7 +25,8 @@ anyhow.workspace = true
 tracing.workspace = true
 nostr-sdk = { workspace = true, optional = true }
 nostr = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
+chacha20poly1305 = "0.10.1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -37,7 +38,7 @@ nostr-sdk = { workspace = true, features = ["local-relay"] }
 # Optional nostr plumbing: publish and read the user's device list, and send or
 # receive friend invites as NIP-17 direct messages. Never needed for direct or
 # LAN use; see docs/DESIGN.md.
-nostr = ["dep:nostr-sdk", "dep:nostr", "dep:serde_json"]
+nostr = ["dep:nostr-sdk", "dep:nostr"]
 # Spike: call signalling (ring, answer, hang up) over friend links. No media;
 # see docs/DESIGN.md "Calls and video".
 calls = []

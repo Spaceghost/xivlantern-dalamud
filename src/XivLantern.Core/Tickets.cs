@@ -7,6 +7,7 @@ public enum TicketKind
     Room,
     Node,
     Announcement,
+    SealedRoom,
 }
 
 /// <summary>Recognises the tickets a player pastes. Never acts on them: accepting is always a separate click.</summary>
@@ -16,6 +17,7 @@ public static class Tickets
     [
         ("ltfriend", TicketKind.FriendInvite),
         ("ltroom", TicketKind.Room),
+        ("ltsealed", TicketKind.SealedRoom),
         ("ltnode", TicketKind.Node),
         ("ltannounce", TicketKind.Announcement),
     ];
@@ -56,6 +58,7 @@ public static class Tickets
     {
         TicketKind.FriendInvite => "a friend invite",
         TicketKind.Room => "a channel ticket",
+        TicketKind.SealedRoom => "a sealed channel ticket",
         TicketKind.Node => "a node address",
         TicketKind.Announcement => "a signed announcement",
         _ => "not a Lantern ticket",

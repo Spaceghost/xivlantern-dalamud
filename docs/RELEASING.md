@@ -62,3 +62,30 @@ packs to the same bytes.
 
 That the plugin works in the game. The workflow builds and tests without the game;
 only playing it verifies it, and the changelog's statuses say which is which.
+
+## Offline announcement drafts
+
+The release entrypoint includes `announcement-draft` with a release tag, an
+explicit `--seq` and a fresh `--out` directory. It prepares release-news content
+from the same changelog and installer summaries; it does not cut a release,
+read signing keys, sign, contact the network or publish. The output contains
+complete release notes, a size-limited announcement body and structured
+signing/public-only verification arguments. See AUTHOR.md for local sequence
+reservations and the separate author-machine signing/handoff workflow.
+
+Signing stays off CI. Preparing a draft does not reserve a sequence or prove
+that it exceeds previous announcements. The normal release command currently
+does not automatically sign or publish this draft. The real author identity
+and node are not configured in this build.
+
+Normal testing/stable release commands can opt into unsigned news preparation
+with paired `--announcement-seq` and `--announcement-out` flags. The output must
+be a fresh directory outside the repository; invalid options are refused before
+release work. A dry run only describes the draft step. A real invocation first
+finishes release verification, then prepares the draft for that exact tag.
+Signing keys are not read and announcements are not published by this step.
+
+If draft preparation fails after verification, the release is already verified.
+Retry only the standalone draft operation with a fresh output directory; do not
+cut the release again. The feature remains opt-in and actual public release
+execution has not been exercised for these changes.

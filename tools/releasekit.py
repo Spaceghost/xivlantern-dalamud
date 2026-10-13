@@ -11,6 +11,8 @@ Run it through tools/release.sh; the release workflow calls the rest:
   title TAG                 (workflow) the release's title
   notes TAG --assets DIR    (workflow) the release notes, from the changelog
   installer-notes TAG       (workflow) the few lines Dalamud's installer shows
+  announcement-draft TAG --seq N --out DIR
+                            prepare unsigned release news offline (no signing/publication)
   verify TAG                the release, its files, the listing and every download
 
 Versions. A tag is vX.Y.Z (stable) or vX.Y.Z-test.N (testing). Dalamud compares the
@@ -387,7 +389,34 @@ def ci_green(c: dict[str, str], sha: str) -> None:
         time.sleep(30)
 
 
-def release(c: dict[str, str], kind: str, base: str | None, headline: str | None, dry: bool) -> None:
+def announcement_options(seq: int | None, output: Path | None) -> None:
+    if (seq is None) != (output is None):
+        raise Fail("--announcement-seq and --announcement-out must be supplied together")
+    if seq is None:
+        return
+    if type(seq) is not int or not 1 <= seq < 2**64:
+        raise Fail("announcement sequence must be a positive u64")
+    target = output.resolve()
+    if target == ROOT or ROOT in target.parents:
+        raise Fail("announcement drafts must be outside the repository")
+    if output.is_symlink() or target.exists():
+        raise Fail("announcement output already exists; drafts are never overwritten")
+
+
+def finish_release(c: dict[str, str], version: Version, assembly_version: str,
+                   announcement_seq: int | None, announcement_out: Path | None) -> None:
+    verify(c, version, assembly_version)
+    if announcement_seq is not None:
+        try:
+            sys.stdout.write(run(sys.executable, str(ROOT / "tools" / "release-announcement.py"),
+                                 version.tag, "--seq", str(announcement_seq), "--out", str(announcement_out)))
+        except (SystemExit, Fail) as error:
+            raise Fail(f"{version.tag} is already verified; announcement preparation failed. Retry announcement-draft separately, not the release command") from error
+
+
+def release(c: dict[str, str], kind: str, base: str | None, headline: str | None, dry: bool,
+            announcement_seq: int | None = None, announcement_out: Path | None = None) -> None:
+    announcement_options(announcement_seq, announcement_out)
     repo = c["REPO"]
     run("gh", "auth", "status")
     if run("git", "rev-parse", "--abbrev-ref", "HEAD") != "master":
@@ -444,6 +473,8 @@ def release(c: dict[str, str], kind: str, base: str | None, headline: str | None
     if dry:
         print("   would change: " + ", ".join(changed + (c["CHANGELOG_FILES"].split() if stamp else [])))
         print(f"   would commit, tag {tag}, push master and the tag, then wait for the Release workflow")
+        if announcement_seq is not None:
+            print(f"   would prepare unsigned announcement #{announcement_seq} in {announcement_out} after successful release verification")
         print("-" * 72)
         print(f"# {title(c, v)}\n")
         print(notes(c, v, None, source))
@@ -479,7 +510,7 @@ def release(c: dict[str, str], kind: str, base: str | None, headline: str | None
                       cwd=ROOT, stdout=subprocess.DEVNULL).returncode != 0:
         raise Fail(f"the Release workflow failed: gh run view {run_id} --repo {repo} --log-failed\n"
                    f"Fix it on master, then re-run that workflow; the tag stays where it is.")
-    verify(c, v, new4)
+    finish_release(c, v, new4, announcement_seq, announcement_out)
 
 
 # ---------------------------------------------------------------- command line
@@ -500,15 +531,37 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("notes")
     p.add_argument("tag")
     p.add_argument("--assets", type=Path, help="the folder holding SHA256SUMS")
+    p = sub.add_parser("announcement-draft", help="prepare unsigned release news offline")
+    p.add_argument("tag")
+    p.add_argument("--seq", type=int, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("announcement-sign", help="sign and verify a reviewed draft locally; never publish")
+    p.add_argument("draft", type=Path)
+    p.add_argument("--cli", required=True)
+    p.add_argument("--key", type=Path, required=True)
+    p.add_argument("--public-key", required=True)
+    p.add_argument("--previous-seq", type=int, help="one-time migration of an older key's signing history")
     p = sub.add_parser("verify", help="check a published release end to end")
     p.add_argument("tag")
     p.add_argument("--no-wait", action="store_true", help="do not wait for the listing's cache")
+    for name in ("test", "stable"):
+        command = sub.choices[name]
+        command.add_argument("--announcement-seq", type=int, help="prepare unsigned news after release verification")
+        command.add_argument("--announcement-out", type=Path, help="fresh draft directory outside the repository")
     args = ap.parse_args(argv)
     c = conf()
     if args.cmd in ("test", "stable"):
         if args.version and not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
             raise Fail(f"{args.version} is not X.Y.Z")
-        release(c, args.cmd, args.version, getattr(args, "title", None), args.dry_run)
+        release(c, args.cmd, args.version, getattr(args, "title", None), args.dry_run,
+                args.announcement_seq, args.announcement_out)
+        return 0
+    if args.cmd == "announcement-sign":
+        signing = [sys.executable, str(ROOT / "tools" / "sign-release-announcement.py"),
+                   str(args.draft), "--cli", args.cli, "--key", str(args.key), "--public-key", args.public_key]
+        if args.previous_seq is not None:
+            signing += ["--previous-seq", str(args.previous_seq)]
+        sys.stdout.write(run(*signing))
         return 0
     v = Version(args.tag)
     if args.cmd == "check-tag":
@@ -519,6 +572,9 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(notes(c, v, args.assets))
     elif args.cmd == "installer-notes":
         print(installer_notes(c, v))
+    elif args.cmd == "announcement-draft":
+        sys.stdout.write(run(sys.executable, str(ROOT / "tools" / "release-announcement.py"),
+                             v.tag, "--seq", str(args.seq), "--out", str(args.out)))
     elif args.cmd == "verify":
         verify(c, v, None, wait=not args.no_wait)
     return 0

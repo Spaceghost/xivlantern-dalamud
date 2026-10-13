@@ -53,6 +53,21 @@ public enum LanternEventKind : uint
     SupportFailed = 32,
     /// <summary>Handle = the SelfTest() handle; Text = JSON report.</summary>
     SelfTest = 33,
+    /// <summary>Handle = room; Peer = original author; Data = native-verified signed LTHREC01 record; live.</summary>
+    ChannelRecord = 34,
+    /// <summary>Same original signed record; historical. Never replay timers or notifications.</summary>
+    ChannelHistory = 35,
+    /// <summary>Handle = room. Local clear succeeded; other members still retain their copies.</summary>
+    ChannelHistoryCleared = 36,
+    /// <summary>Handle = nostr job; Text = completion detail.</summary>
+    NostrDone = 37,
+    /// <summary>Handle = nostr job; Text = failure detail.</summary>
+    NostrFailed = 38,
+    /// <summary>Peer = verified nostr sender; Text = friend ticket. Acceptance is explicit.</summary>
+    NostrInvite = 39,
+    /// <summary>Handle = nostr job; Peer = nostr user; Data = concatenated 32-byte device ids.</summary>
+    NostrDevices = 40,
+    BlobWithdrawn = 41,
 }
 
 public enum PresenceStatus : uint

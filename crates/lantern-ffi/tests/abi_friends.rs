@@ -250,6 +250,21 @@ fn a_bad_invite_is_refused_synchronously() {
 }
 
 #[test]
+fn activity_tag_json_rejects_invalid_or_oversized_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let n = open(dir.path(), "Tags");
+    for invalid in ["null", "{}", "[12]", "[\"unterminated"] {
+        let text = CString::new(invalid).unwrap();
+        assert_eq!(unsafe { lt_activity_tags_set(n.p, text.as_ptr()) }, LT_E_ARG);
+    }
+    assert_eq!(unsafe { lt_activity_tags_set(n.p, ptr::null()) }, LT_E_ARG);
+    let large = CString::new(format!("[\"{}\"]", "a".repeat(4096))).unwrap();
+    assert_eq!(unsafe { lt_activity_tags_set(n.p, large.as_ptr()) }, LT_E_TOO_LARGE);
+    let empty = CString::new("[]").unwrap();
+    assert_eq!(unsafe { lt_activity_tags_set(n.p, empty.as_ptr()) }, LT_OK);
+}
+
+#[test]
 fn selftest_block_and_the_author_channel_through_the_c_abi() {
     let dir = tempfile::tempdir().unwrap();
     let alice = open(dir.path(), "Alice");

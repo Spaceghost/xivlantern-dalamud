@@ -160,7 +160,18 @@ typedef uint64_t lt_blob;
 #define LT_EV_SUPPORT_REPLY    30 /* a support contact answered: handle = id, data = text */
 #define LT_EV_SUPPORT_DELIVERED 31 /* handle = id from lt_support_send */
 #define LT_EV_SUPPORT_FAILED   32 /* handle = id; data = reason. Not retried */
+#define LT_EV_CHANNEL_RECORD 34 /* room, peer=original author, verified LTHREC01 bytes; live */
+#define LT_EV_CHANNEL_HISTORY_CLEARED 36 /* room; local database clear succeeded */
+#define LT_EV_CHANNEL_HISTORY 35 /* same original bytes; historical: never replay timers/notifications */
 #define LT_EV_SELFTEST         33 /* handle = lt_selftest handle; data = JSON report */
+#define LT_EV_NOSTR_DONE       37 /* handle = job; data = UTF-8 completion detail */
+#define LT_EV_NOSTR_FAILED     38 /* handle = job; data = UTF-8 failure detail */
+#define LT_EV_NOSTR_INVITE     39 /* peer = verified nostr sender; data = friend ticket.
+                                    Never redeemed automatically; not a log message. */
+#define LT_EV_NOSTR_DEVICES    40 /* handle = job; peer = nostr user; data = zero or
+                                    more concatenated 32-byte verified device ids */
+
+#define LT_EV_BLOB_WITHDRAWN    41 /* handle = remote blob; no payload. Offer withdrawn/channel left. */
 
 typedef struct lt_event {
     uint32_t       kind;                    /* LT_EV_* */
@@ -242,6 +253,22 @@ LT_API lt_status lt_room_ticket(lt_node *node, lt_room room, char *buf,
 LT_API lt_status lt_room_send(lt_node *node, lt_room room,
                               const uint8_t *data, uint32_t len);
 
+/* Optional history extension: worker-only SQL/crypto. Enable (0/1) delivers
+ * locally saved/reverified rows, fetches on join/reconnect and serves bounded
+ * memory snapshots. Signed live lines use LT_EV_CHANNEL_RECORD instead of
+ * LT_EV_MESSAGE after metadata opt-in; backlog uses LT_EV_CHANNEL_HISTORY. Ordinary
+ * lt_room_send remains opaque/unchanged. Send text is 1..2048 UTF-8 bytes,
+ * controls forbidden except newline. Clear cancels pending catch-up and clears
+ * only local rows; other members' copies cannot be remotely deleted. */
+/* New clients opt into signed event delivery before joining any room. This
+ * controls metadata independently of automatic fetch/serving. Old clients
+ * retain LT_EV_MESSAGE. Enabling room history also opts into metadata. */
+LT_API lt_status lt_channel_record_events_enable(lt_node *node, uint32_t enabled);
+LT_API lt_status lt_room_history_enable(lt_node *node, lt_room room, uint32_t enabled);
+LT_API lt_status lt_room_history_clear(lt_node *node, lt_room room);
+LT_API lt_status lt_room_send_with_history(lt_node *node, lt_room room,
+                                          const uint8_t *data, uint32_t len);
+
 /* Replace this node's presence payload for the room. Re-sent to new peers. */
 LT_API lt_status lt_presence_set(lt_node *node, lt_room room,
                                  const uint8_t *data, uint32_t len);
@@ -285,9 +312,27 @@ LT_API lt_status lt_blob_unoffer(lt_node *node, lt_room room, lt_blob blob);
  * LT_EV_BLOB_PROGRESS, completion as LT_EV_BLOB_DONE. */
 LT_API lt_status lt_blob_fetch(lt_node *node, lt_blob blob, const char *out_path);
 
+/* Explicit bounded fetch of a remote offer: two queued/running jobs per node,
+ * at most 16 MiB, exact offered/Bao tree size, content-hash verification before
+ * saving. Creates a new destination; refuses overwrite. Caller must protect
+ * the parent directory and recheck room/mute policy. No normal blob disk cache.
+ * Existing event kinds carry progress/completion/failure. Optional ABI-2 export;
+ * older libraries lack it and must not fall back to the unrestricted fetch. */
+LT_API lt_status lt_blob_fetch_bounded(lt_node *node, lt_blob blob, const char *out_path);
+
+/* Request cancellation of a queued/running bounded fetch. Completion can race
+ * cancellation; the terminal event determines the result. Optional ABI-2 export. */
+LT_API lt_status lt_blob_cancel_bounded(lt_node *node, lt_blob blob);
+
 /* Hash of an added or offered blob, as lowercase hex. */
 LT_API lt_status lt_blob_hash_text(lt_node *node, lt_blob blob, char *buf,
                                    size_t buf_len, size_t *out_len);
+
+/* Optional ABI-2 exports. Offer a prepared local file to an authenticated friend;
+ * receiver sees BLOB_OFFER with room 0 and explicitly chooses whether to fetch.
+ * Older clients may ignore these frames; no offline/delivery guarantee. */
+LT_API lt_status lt_friend_file_offer(lt_node *node, const uint8_t peer[LT_NODE_ID_LEN], lt_blob blob);
+LT_API lt_status lt_friend_file_withdraw(lt_node *node, const uint8_t peer[LT_NODE_ID_LEN], lt_blob blob);
 
 /* Not implemented yet, and therefore not declared: lt_room_send_to,
  * lt_accept_inbound (runtime toggle), lt_blob_fetch_ticket, lt_blob_cancel,
@@ -310,7 +355,11 @@ LT_API lt_status lt_profile_set_name(lt_node *node, const char *name);
 /* What friends see. `note` is free text the player typed (NULL for none);
  * never fill it from game state without the player asking. Persisted. */
 LT_API lt_status lt_presence_status_set(lt_node *node, uint32_t status,
-                                        const char *note);
+                                       const char *note);
+
+/* Optional ABI-2 extension: JSON array of player-supplied strings. At most
+ * eight tags of 32 UTF-8 bytes survive cleanup. Old libraries lack this symbol. */
+LT_API lt_status lt_activity_tags_set(lt_node *node, const char *tags_json);
 
 /* Mint a single-use friend invite ("ltfriend..."). ttl_secs 0 never expires.
  * Buffer contract as above; nothing is minted when the buffer is too small. */
@@ -350,6 +399,17 @@ LT_API lt_status lt_friend_history(lt_node *node, const uint8_t peer[LT_NODE_ID_
 /* A group channel is a gossip room with a random key, so it cannot be found
  * without its ticket. Use the room calls on the returned handle. */
 LT_API lt_status lt_channel_create(lt_node *node, const char *label, lt_room *out_room);
+/* Optional ABI-2 exports: feature-detect all four before showing sealed controls.
+ * Custom scope only. Reseal creates a fresh room/key; does not send tickets or
+ * leave the old room. Ticket holders can still read old retained ciphertext. */
+LT_API lt_status lt_channel_create_sealed(lt_node *node, const char *label, lt_room *out_room);
+LT_API lt_status lt_channel_reseal(lt_node *node, lt_room room, lt_room *out_room);
+LT_API lt_status lt_room_is_sealed(lt_node *node, lt_room room, uint32_t *out_sealed);
+/* Encrypt before shared-cache import; max 16 MiB plaintext. Offer separately.
+ * The resulting blob is bound to this channel and cannot be offered elsewhere.
+ * Download only with lt_blob_fetch_bounded, which authenticates and decrypts. */
+LT_API lt_status lt_blob_add_sealed_bytes(lt_node *node, lt_room room, const uint8_t *data,
+                                      uint32_t len, const char *name, lt_blob *out_blob);
 
 /* Send a linked friend this room's ticket; they get LT_EV_CHANNEL_INVITE. */
 LT_API lt_status lt_channel_invite(lt_node *node, const uint8_t peer[LT_NODE_ID_LEN],
@@ -424,6 +484,22 @@ LT_API lt_status lt_id_from_text(const char *text, uint8_t out_id[LT_NODE_ID_LEN
 
 /* Human-readable name for a status code. Static string, never NULL. */
 LT_API const char *lt_status_text(lt_status status);
+
+
+/* Optional exports: present only with the lantern-ffi/nostr feature. Resolve
+ * dynamically. Preparation reads/writes SQLite and performs cryptography:
+ * call on a background thread, never the game/render thread. No call accepts
+ * an incoming invitation automatically. Relay bytes are UTF-8 URLs separated
+ * by LF, no trailing LF: 1..8 distinct ws/wss URLs, each <=2048 bytes, total
+ * <=16384. The caller explicitly chooses the relays. No default relay contact.
+ * lt_nostr_identity creates/loads the local nostr key and returns only its npub.
+ * Invite TTL is 1..604800 seconds. Send/check return jobs; events 37..39 carry
+ * completion/failure and pending invitations. */
+LT_API lt_status lt_nostr_identity(lt_node *node, char *buf, size_t cap, size_t *out_len);
+LT_API lt_status lt_nostr_send_invite(lt_node *node, const uint8_t *relays, uint32_t relays_len,
+                                    const char *recipient, uint32_t ttl_secs, uint64_t *out_handle);
+LT_API lt_status lt_nostr_check_inbox(lt_node *node, const uint8_t *relays, uint32_t relays_len,
+                                    uint64_t *out_handle);
 
 #ifdef __cplusplus
 }

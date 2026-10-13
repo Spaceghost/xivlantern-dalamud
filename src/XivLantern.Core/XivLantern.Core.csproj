@@ -10,5 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="XivLantern.Core.Tests" />
+    <EmbeddedResource Include="Resources/eff_large_wordlist.txt" />
+    <EmbeddedResource Include="Resources/EFF-WORDLIST-NOTICE.txt" />
   </ItemGroup>
 </Project>

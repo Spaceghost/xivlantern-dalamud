@@ -31,8 +31,8 @@ public static class Privacy
             "IP address and node id and when you are online; when no direct path can be made it forwards your encrypted " +
             "traffic. It cannot read messages.",
         RelayChoice.Off =>
-            "Relays: off. No third party is contacted at all, including n0's address lookup. Only direct paths work — on " +
-            "your LAN, or with open ports — so most friends elsewhere will not reach you.",
+            "Peer relays: off. No third party is contacted for peer connections, including n0's address lookup. Only direct paths work — on " +
+            "your LAN, or with open ports — so most friends elsewhere will not reach you. Optional name-card services are separate.",
         RelayChoice.Custom =>
             $"Relays: your own relay at {(string.IsNullOrWhiteSpace(customUrl) ? "(no URL set)" : customUrl)}. Its operator " +
             "sees your IP address and node id. n0's address lookup is still used to find friends by node id.",
@@ -42,6 +42,13 @@ public static class Privacy
     public const string Storage =
         "Your node key, friend list, 1:1 messages and settings are kept in this plugin's config folder, unencrypted, like " +
         "an SSH key. Anyone with that folder can act as you on Lantern.";
+
+    public const string NameCards =
+        "Name-card invitations are optional and off until you enable them. Manually sending or checking invitations contacts " +
+        "the nostr relays you choose; their operators see your IP address, connection and message timing, and retain encrypted " +
+        "invitation envelopes. Resolving name@domain contacts that domain over HTTPS and reveals the queried name and your IP " +
+        "address. Domain mappings identify public keys, not people. No suggested relays are adopted automatically. " +
+        "The name-card identity key is saved unencrypted in this config folder; ignored-invite fingerprints are saved locally.";
 
     public const string TermsOfService =
         "Third-party plugins are against the FINAL FANTASY XIV terms of service. Lantern never automates or sends a game " +
