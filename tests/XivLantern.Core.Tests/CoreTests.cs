@@ -73,6 +73,12 @@ public class TextAndTicketTests
         Assert.Equal(TicketKind.FriendInvite, kind);
         Assert.Equal("ltfriendafwxmtvu3li6abcdefgh", t);
         Assert.Equal(TicketKind.Room, Tickets.Find("LTROOMAFYKIA7HGVIUABCD").Kind);
+        var sealedTicket = Tickets.Find("Friend: <LTSEALEDAFYKIA7HGVIUABCD>.");
+        Assert.Equal(TicketKind.SealedRoom, sealedTicket.Kind);
+        Assert.Equal("ltsealedafykia7hgviuabcd", sealedTicket.Ticket);
+        Assert.Equal("a sealed channel ticket", Tickets.Describe(sealedTicket.Kind));
+        Assert.Equal(TicketKind.None, Tickets.Find("ltsealed").Kind);
+        Assert.Equal(TicketKind.None, Tickets.Find("ltsealed0189!!!!!!!!!!").Kind);
         Assert.Equal(TicketKind.Announcement, Tickets.Find("ltannounceabcdefghijk").Kind);
         Assert.Equal(TicketKind.None, Tickets.Find("ltfriend").Kind);
         Assert.Equal(TicketKind.None, Tickets.Find("ltfriend0189!!!!!!!!!!").Kind);

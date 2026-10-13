@@ -6,6 +6,8 @@
 #   tools/build-native.sh            # lantern.dll (x86_64-pc-windows-gnu) + liblantern.so
 #
 # Output (LANTERN_NATIVE_OUT overrides): ../xiv-lantern-build/native/
+# LANTERN_NATIVE_FEATURES defaults to nostr; set empty for a minimal library.
+# This provides name-card exports; runtime relay use remains explicit and opt-in.
 #   lantern.dll        for the game (Windows PE; runs under Wine)
 #   linux/liblantern.so for the binding's tests on a Linux host
 #
@@ -18,8 +20,12 @@ for tool in cargo x86_64-w64-mingw32-gcc; do
   command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 127; }
 done
 cd "$ROOT"
-cargo build --release --locked -p lantern-ffi --target x86_64-pc-windows-gnu
-cargo build --release --locked -p lantern-ffi
+features=()
+if [[ -n "${LANTERN_NATIVE_FEATURES-nostr}" ]]; then
+  features=(--features "${LANTERN_NATIVE_FEATURES-nostr}")
+fi
+cargo build --release --locked -p lantern-ffi "${features[@]}" --target x86_64-pc-windows-gnu
+cargo build --release --locked -p lantern-ffi "${features[@]}"
 mkdir -p "$OUT/linux"
 cp target/x86_64-pc-windows-gnu/release/lantern.dll "$OUT/lantern.dll"
 cp target/release/liblantern.so "$OUT/linux/liblantern.so"

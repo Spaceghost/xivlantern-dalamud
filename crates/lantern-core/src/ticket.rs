@@ -64,6 +64,103 @@ impl Scope {
 
 pub const TICKET_PREFIX: &str = "ltroom";
 
+/// Separate from `ltroom`: old clients must reject rather than join without
+/// encryption. The key grants read access; never include it in logs or Debug.
+pub const SEALED_TICKET_PREFIX: &str = "ltsealed";
+const SEALED_TICKET_VERSION: u16 = 1;
+const MAX_SEALED_TICKET_BYTES: usize = 8192;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealedRoomTicket {
+    version: u16,
+    pub topic: TopicId,
+    pub label: String,
+    pub peers: Vec<EndpointAddr>,
+    key: [u8; 32],
+}
+
+impl fmt::Debug for SealedRoomTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SealedRoomTicket")
+            .field("version", &self.version)
+            .field("topic", &self.topic)
+            .field("label", &self.label)
+            .field("peers", &self.peers)
+            .field("key", &"[redacted]")
+            .finish()
+    }
+}
+
+impl SealedRoomTicket {
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    /// Every creation (including a reseal) gets an independent topic and key.
+    pub fn new(label: impl Into<String>, peers: Vec<EndpointAddr>) -> crate::Result<Self> {
+        let mut random = [0u8; 64];
+        getrandom::fill(&mut random)
+            .map_err(|_| Error::State("OS random source unavailable"))?;
+        let mut topic = [0u8; 32];
+        topic.copy_from_slice(&random[..32]);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&random[32..]);
+        let ticket = Self {
+            version: SEALED_TICKET_VERSION,
+            topic: TopicId::from_bytes(topic),
+            label: label.into(),
+            peers,
+            key,
+        };
+        ticket.validate()?;
+        Ok(ticket)
+    }
+
+    fn validate(&self) -> crate::Result<()> {
+        if self.version != SEALED_TICKET_VERSION
+            || self.label.is_empty()
+            || self.label.len() > 256
+            || self.label.chars().any(char::is_control)
+            || self.peers.len() > 16
+            || postcard::to_stdvec(self).map_err(|_| Error::Ticket)?.len()
+                > MAX_SEALED_TICKET_BYTES
+        {
+            return Err(Error::Ticket);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for SealedRoomTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = postcard::to_stdvec(self).map_err(|_| fmt::Error)?;
+        let text = data_encoding::BASE32_NOPAD.encode(&bytes).to_ascii_lowercase();
+        write!(f, "{SEALED_TICKET_PREFIX}{text}")
+    }
+}
+
+impl FromStr for SealedRoomTicket {
+    type Err = Error;
+
+    fn from_str(s: &str) -> crate::Result<Self> {
+        // Bound allocation before decoding or constructing attacker-controlled strings.
+        if s.len() > SEALED_TICKET_PREFIX.len() + MAX_SEALED_TICKET_BYTES * 8 / 5 + 2 {
+            return Err(Error::Ticket);
+        }
+        let body = s.trim().strip_prefix(SEALED_TICKET_PREFIX).ok_or(Error::Ticket)?;
+        let bytes = data_encoding::BASE32_NOPAD
+            .decode(body.to_ascii_uppercase().as_bytes())
+            .map_err(|_| Error::Ticket)?;
+        let (ticket, remainder): (Self, &[u8]) =
+            postcard::take_from_bytes(&bytes).map_err(|_| Error::Ticket)?;
+        if !remainder.is_empty() {
+            return Err(Error::Ticket);
+        }
+        ticket.validate()?;
+        Ok(ticket)
+    }
+}
+
 /// Everything a joiner needs: which topic, and somebody already in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomTicket {
@@ -220,6 +317,52 @@ impl FromStr for FriendInvite {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+
+    #[test]
+    fn sealed_tickets_round_trip_without_plaintext_downgrade() {
+        let ticket = SealedRoomTicket::new("Private friends", vec![addr()]).unwrap();
+        let text = ticket.to_string();
+        assert_eq!(text.parse::<SealedRoomTicket>().unwrap(), ticket);
+        assert!(text.parse::<RoomTicket>().is_err());
+        assert!(text.parse::<NodeTicket>().is_err());
+        assert!(text.parse::<FriendInvite>().is_err());
+        let plain = RoomTicket::new(ticket.topic, Scope::Custom, "Plain", vec![]);
+        assert!(plain.to_string().parse::<SealedRoomTicket>().is_err());
+        let debug = format!("{ticket:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains(&format!("{:?}", ticket.key)));
+    }
+
+    #[test]
+    fn sealed_recreation_changes_topic_and_key() {
+        let first = SealedRoomTicket::new("Friends", vec![]).unwrap();
+        let second = SealedRoomTicket::new("Friends", vec![]).unwrap();
+        assert_ne!(first.topic, second.topic);
+        assert_ne!(first.key, second.key);
+    }
+
+    #[test]
+    fn sealed_tickets_reject_versions_trailing_bytes_and_invalid_metadata() {
+        let ticket = SealedRoomTicket::new("Friends", vec![]).unwrap();
+        let encode = |value: &SealedRoomTicket, trailing: &[u8]| {
+            let mut bytes = postcard::to_stdvec(value).unwrap();
+            bytes.extend_from_slice(trailing);
+            format!("{SEALED_TICKET_PREFIX}{}", data_encoding::BASE32_NOPAD.encode(&bytes))
+        };
+        assert!(encode(&ticket, &[0]).parse::<SealedRoomTicket>().is_err());
+        let mut future = ticket.clone();
+        future.version += 1;
+        assert!(encode(&future, &[]).parse::<SealedRoomTicket>().is_err());
+        for label in [String::new(), "x".repeat(257), "Friends\nsecret".into()] {
+            assert!(SealedRoomTicket::new(label, vec![]).is_err());
+        }
+        let mut invalid = ticket;
+        invalid.label = "x".repeat(257);
+        assert!(encode(&invalid, &[]).parse::<SealedRoomTicket>().is_err());
+        assert!(SealedRoomTicket::new("Friends", vec![addr(); 17]).is_err());
+        assert!(format!("{SEALED_TICKET_PREFIX}{}", "a".repeat(14000))
+            .parse::<SealedRoomTicket>().is_err());
+    }
 
     #[test]
     fn friend_invites_round_trip_and_are_not_other_tickets() {

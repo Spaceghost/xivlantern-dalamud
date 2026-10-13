@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\XivLantern.Core\XivLantern.Core.csproj" />
+    <None Include="../XivLantern.Core/Resources/EFF-WORDLIST-NOTICE.txt" Link="EFF-WORDLIST-NOTICE.txt" CopyToOutputDirectory="PreserveNewest" />
     <ProjectReference Include="..\..\bindings\csharp\Lantern\Lantern.csproj" />
     <Compile Include="..\Shared\IpcContract.cs" Link="Shared\IpcContract.cs" />
   </ItemGroup>

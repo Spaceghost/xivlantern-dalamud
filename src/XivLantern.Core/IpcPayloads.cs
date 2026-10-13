@@ -30,6 +30,9 @@ public static class IpcPayloads
                 w.WriteBoolean("online", f.Online);
                 w.WriteString("status", f.StatusLabel);
                 w.WriteString("note", f.Online ? f.Note : "");
+                w.WriteStartArray("tags");
+                if (f.Online) foreach (var tag in ActivityTags.Normalize(f.Tags)) w.WriteStringValue(tag);
+                w.WriteEndArray();
                 w.WriteEndObject();
             }
 

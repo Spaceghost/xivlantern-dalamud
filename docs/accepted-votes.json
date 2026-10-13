@@ -1,0 +1,578 @@
+{
+  "mod": "xivlantern",
+  "catalogue_version": 1,
+  "accepted_count": 20,
+  "note": "All 20 Want features remain in scope. Host-tested is local source/test evidence, not released or certified in game. Queued entries have not been audited for implementation completeness.",
+  "features": [
+    {
+      "id": "lantern-status-presets",
+      "title": "Status Presets",
+      "status": "host-tested",
+      "evidence": [
+        "src/XivLantern.Core/StatusPresets.cs",
+        "src/XivLantern.Core/Commands.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "src/XivLantern.Plugin/Plugin.cs",
+        "tests/XivLantern.Core.Tests/StatusPresetTests.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "bindings/csharp/Lantern.Tests/Lantern.Tests.csproj"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "Windows/Wine native and in-game preset UI/command verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "The 76-test Core suite passes, including preset command parsing, persistence round trip, case-insensitive replacement/removal, UTF-8 note bounds, invalid names/presence, damaged configuration and maximum count. Plugin Release build passes against the local Dalamud SDK. The configured build output now includes the Windows release lantern.dll; the managed Release build has zero warnings. No live network or game commands were executed.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-idle-away",
+      "title": "Away When You Walk Off",
+      "status": "host-tested",
+      "evidence": [
+        "src/XivLantern.Core/IdleAway.cs",
+        "src/XivLantern.Plugin/IdleInput.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "tests/XivLantern.Core.Tests/IdleAwayTests.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "bindings/csharp/Lantern.Tests/Lantern.Tests.csproj"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "Windows/Wine idle API, controller-only behavior and game UI verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "The 76-test Core suite passes, including the banned-game-API check and eleven idle-away cases. The production policy preserves manual status and note, only switches online to away, restores after activity/disable/unavailable samples, respects explicit manual changes, retries failed transitions, resets on disconnect, and handles uint tick wrap. GetLastInputInfo/GetTickCount adapter runs at most once per second and remains inactive by default. Transient away state is not saved into configuration. Plugin Release build passes with zero warnings and the Windows release native library included. No live user identity or game connection was exercised; Windows/Wine and game behavior remain unverified.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-lfg-tags",
+      "title": "Up For It Tags",
+      "status": "host-tested",
+      "evidence": [
+        "crates/lantern-core/src/node/friends.rs",
+        "crates/lantern-core/tests/friends.rs",
+        "crates/lantern-ffi/src/lib.rs",
+        "include/lantern.h",
+        "bindings/csharp/Lantern/Native.cs",
+        "bindings/csharp/Lantern/LanternNode.cs",
+        "src/XivLantern.Core/ActivityTags.cs",
+        "src/XivLantern.Core/Model.cs",
+        "src/XivLantern.Core/IpcPayloads.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Plugin/Plugin.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "tests/XivLantern.Core.Tests/ActivityTagTests.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "crates/lantern-ffi/tests/abi_friends.rs",
+        "tests/native/mixed_version.c",
+        "crates/lantern-core/Cargo.toml",
+        "tools/test-mixed-version-container.sh"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "All 79 managed Core tests, 75 default-feature Rust tests and 86 optional-feature Rust tests pass. Plugin Release build has zero warnings and includes the updated Windows native library. All five C# native-binding tests pass with zero skips against the optimized Linux library, proving authenticated tag delivery, custom activities, clear, invisible suppression and visibility restoration. An actual independently loaded pre-tag/tagged optimized library pair befriends, retains away/note presence and sends text both ways after tag frames; the legacy peer exposes no activities. Windows PE header/tag export and absence of extra MinGW runtime imports are checked. Local vote-preview-tags/latest.zip passes manifest API/version, required files, EFF attribution and exact built-byte checks. It is unreleased and not installed in game. Windows/Linux native hashes and zip checksums are recorded with artifacts; default local native outputs now match the checked tag build, with pre-tag binaries archived. Wine prefix initialization still times out before ABI execution, including a run after Rust compilation stopped.",
+      "remaining": [
+        "Windows/Wine native execution and in-game tag controls/filter/IPC verification",
+        "Published release and game certification; local preview is unreleased"
+      ],
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/activity-tags-release-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/activity-tags-release-binding-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/activity-tags-release-mixed-version.log"
+      ]
+    },
+    {
+      "id": "lantern-friend-groups",
+      "title": "Friend Folders",
+      "status": "host-tested",
+      "evidence": [
+        "src/XivLantern.Core/FriendFolders.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Plugin/Plugin.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "tests/XivLantern.Core.Tests/FriendFolderTests.cs"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "In-game folder/header/context-menu/mute verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "All 51 Core tests pass, including identity-based grouping, online counts, current-member filtering, case-insensitive assignment and persistence, moving/unassigning, existing friend/channel mute preservation and invalid local configuration. Plugin Release build passes with the existing missing native library warning. Folder header IDs stay fixed when counts change. Assignments/mutes modify local configuration only; no network API is called by folder operations. Native build job is still running independently; game UI and release packaging remain unverified.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-dtr-roster",
+      "title": "Glance at the Server Bar",
+      "status": "host-tested",
+      "evidence": [
+        "src/XivLantern.Core/DtrRoster.cs",
+        "src/XivLantern.Plugin/Notifier.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "tests/XivLantern.Core.Tests/DtrRosterTests.cs"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "In-game SeString/tooltip rendering and click/privacy verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "All 54 Core tests pass. DtrRoster tests cover online-first/name sorting, simultaneous online/unread counts, status/short-note rows, stale offline-note suppression, eight-friend cap, remaining count, hidden-roster privacy mode, invalid unread count, text length bounds and control-payload/newline filtering. Notifier uses this formatter and immediately refreshes when tooltip privacy changes, while retaining its existing click callback. No game commands or live network actions were performed. Native job remains live; game rendering/release packaging are unverified.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-channel-history",
+      "title": "Catch Up on Join",
+      "status": "in-progress",
+      "evidence": [
+        "crates/lantern-core/src/channel_history.rs",
+        "crates/lantern-core/src/lib.rs",
+        "docs/DESIGN.md",
+        "crates/lantern-core/src/store.rs",
+        "crates/lantern-cli/src/main.rs",
+        "crates/lantern-cli/tests/demo.rs",
+        "crates/lantern-core/src/node.rs",
+        "crates/lantern-core/src/proto.rs",
+        "src/XivLantern.Core/ChatBook.cs",
+        "tests/XivLantern.Core.Tests/ChannelHistoryTests.cs",
+        "crates/lantern-core/src/channel_history/network.rs",
+        "crates/lantern-core/src/node/history.rs",
+        "crates/lantern-ffi/tests/abi_history.rs",
+        "bindings/csharp/Lantern/ChannelRecord.cs",
+        "bindings/csharp/Lantern.Tests/ChannelRecordTests.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "tests/native/mixed_version.c",
+        "tests/wine/abi_smoke.c",
+        "tools/test-wine-container.sh",
+        "tools/package.sh",
+        "crates/lantern-core/src/node/history/delivery.rs",
+        "crates/lantern-core/src/node/history/peers.rs"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "Signed room-bound records bind original author, random 128-bit identity, claimed sender time and bounded UTF-8 text. Native workers reverify original signatures during storage, snapshot parsing and delivery; C# structurally parses trusted native events rather than independently verifying arbitrary input. Identical text with different signatures is retained. Receipt-time retention is 24 hours, 256 records per room and 8,192 globally; duplicates do not renew receipts. Automatic catch-up uses signed nonce/attempt requests, addressed/provider-bound offers, four fetch/serve slots, authenticated bounded Bao downloads, memory-only snapshots, 32 cached snapshots and 60-second leases. Clear cancels delayed fetches under the store lock. Optional C ABI exports and events 34/35/36 carry exact live/history records and successful local-clear acknowledgement. Dedicated per-active-handle delivery retains 256 distinct pending originals and one clear acknowledgement, coalesces duplicates, alternates with general events and drains channels round-robin. Excess pending records evict the oldest with a drop count. Clear removes older pending lines, blocked authors are purged without an enqueue race, block/unblock invalidates cached offer views, and late metadata cannot recreate left/closed handles. Polling performs no SQL or cryptography. The configurable UI loads backlog without unread counts, live notifications or pull replay; full signatures deduplicate, raw claimed times are preserved, and tooltips show original node identity/time caveats. All 102 default and 113 optional workspace tests pass (native/channel-history-delivery-privacy-workspace-tests.log), including real two-channel/512-record pressure with a 16-slot general queue, active-handle lifetime and actual blocking/unblocking/cache invalidation. Optimized Windows/Linux libraries are in native/channel-history-delivery/ (channel-history-delivery-optimized-build.log). All ten actual optimized C# binding tests pass, including author-offline late join/rejoin, clear, original bytes and a 256-record public-API pressure case with zero historical unread count (channel-history-delivery-optimized-managed-pressure-tests.log). Actual archived legacy/new optimized libraries preserve friend/presence/room text and clean repeated signed text interoperability (channel-history-delivery-optimized-mixed-version-tests.log). Expanded Windows ABI smoke passes under isolated Fedora 44 Wine, checking direct reachability, signed live metadata, byte-exact saved originals and acknowledged clear (channel-history-delivery-wine-smoke.log); prefix refresh failure is recorded separately before the actual executable gate. Managed Core passes 85 tests; plugin Release build has zero warnings/errors (channel-history-delivery-plugin-build.log). Refreshed local vote-preview-history-delivery/latest.zip contains exactly six required files matching current managed/native bytes and source manifest, API 15/version 0.1.0.3. SHA256: 93c701a2ebfdb70d76f8befd7c04a2561eff493a665a58cb3aa37101b887c087 (channel-history-delivery-package-verification.txt; tested source hashes in channel-history-delivery-preview-source-digests.txt). Original-creator ticket discovery while the creator is offline remains unproven: current offline tests use an active member ticket. Remaining settings/mute/privacy/game audit and release are open. Nothing is installed or published. Reconnect discovery is now being implemented from remembered providers, scoped to the channel rather than unrelated friends. A new verifier uses the original signed HistoryOffer and checks recipient, room, signature owner equals provider ID, legal attempt/snapshot bounds, at most eight supported routes and a 4,096-byte input limit. Both codec tests pass (native/channel-history-peer-hint-codec-tests.log). Schema 5 adds bounded opaque original-offer storage: 32 providers per channel, 256 globally, 30-day local receipt-time read validity, future-receipt exclusion, and replacement when routes change. New tests cover bounds, scope/expiry/replacement and schema-4 migration preserving identity and original signed messages. All 76 Core tests pass for this codec/storage foundation in native/channel-history-peer-hint-storage-tests.log, including migration preservation and bounded/expired hint storage. Persistence admission after authenticated fetch, read-time signature revalidation and reconnect use are not yet wired; this foundation must not be treated as completed discovery. The checked delivery preview predates schema 5 and the hint codec. Provider hints are now admitted only after live offer checks, authenticated snapshot fetch and successful uncancelled ingestion. Original signed offers are retained; channel joins load only unexpired hints bound to this node/channel, reverify signatures and provider row keys, apply current blocks, and merge/deduplicate them with ticket addresses on the worker. Idle/startup maintenance prunes expired/future hints. All 77 Core tests pass for this integration (native/channel-history-peer-hint-final-core-tests.log). The real three-peer case closes the creator, learns the remaining provider through an authenticated fetch, closes/reopens the joiner using its persisted identity and reuses the original creator-only ticket; it receives all three exact originals as historical events, with no live replay. Cached forged signatures, wrong rooms/row identities and blocked providers are rejected. This proves reconnect to previously met providers, not discovery by a first-time node with no reachable contact. Settings now disclose up-to-30-day remembered channel contacts; plugin UI build passes without warnings/errors but uses the prior native DLL solely for compilation. All 107 default and 118 optional workspace tests pass for new schema-5 source in native/channel-history-peer-hint-workspace-tests.log. Optimized Windows/Linux builds completed in native/channel-history-peer-hint-optimized-build.log under native/channel-history-peers/. All ten optimized C# binding tests pass, including a returning node reopening its persisted identity and using the original creator-only ticket to retrieve three exact originals from its remembered peer without live replay. Optimized legacy-library interoperability passes; the managed plugin build has zero warnings/errors and includes the new Windows DLL. The checked local vote-preview-history-peers/latest.zip contains exactly six current build files, API 15/version 0.1.0.3; SHA256 c740633baa5cc3d697d0c337077036fe4f062b99eb8fdb10572f6e41131c07be. The Windows DLL passes the isolated Wine ABI smoke, including signed metadata, exact saved history and acknowledged local clear (native/channel-history-peer-hint-wine-smoke.log). Disposable Wine prefix refresh still times out; the actual ABI executable succeeds afterward, so prefix refresh is not claimed successful. No game commands, installation, publication or release occurred. First-contact discovery and settings/mute/privacy/game verification remain open.",
+      "remaining": [
+        "Verify schema-5 full workspace/public-binding restart regressions and rebuild optimized native/Wine/package proofs",
+        "Audit multi-channel event capacity, settings/mute/privacy behavior and stale creator-ticket discovery",
+        "Current package in-game verification, including loading transitions and restricted chat-channel safeguards",
+        "Published release and certification"
+      ]
+    },
+    {
+      "id": "lantern-sealed-channels",
+      "title": "Sealed Channels",
+      "status": "in-progress",
+      "evidence": [
+        "crates/lantern-core/src/ticket.rs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-ticket-tests.log",
+        "crates/lantern-core/src/proto.rs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-codec-tests.log",
+        "crates/lantern-core/src/channel_history.rs",
+        "crates/lantern-core/src/channel_history/network.rs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-snapshot-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-snapshot-network-tests.log",
+        "crates/lantern-core/src/node.rs",
+        "crates/lantern-core/src/node/sealed_room.rs",
+        "crates/lantern-core/src/node/history.rs",
+        "crates/lantern-core/src/node/history/peers.rs",
+        "crates/lantern-core/src/node/friends.rs",
+        "crates/lantern-core/tests/two_node.rs",
+        "crates/lantern-core/tests/friends.rs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-room-network-tests.log",
+        "crates/lantern-core/src/sealed_file.rs",
+        "crates/lantern-ffi/src/sealed.rs",
+        "crates/lantern-ffi/tests/abi_history.rs",
+        "bindings/csharp/Lantern/Native.cs",
+        "bindings/csharp/Lantern/LanternNode.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-files-network-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-files-abi-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-files-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-older-library-tests.log",
+        "src/XivLantern.Core/Tickets.cs",
+        "tests/XivLantern.Core.Tests/CoreTests.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-plugin-core-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-plugin-build.log",
+        "tests/wine/abi_smoke.c",
+        "tools/test-wine-container.sh",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-history-restart-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-native-source.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-native-optimized-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-native-wine-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-optimized-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/sealed-optimized-plugin-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-sealed-channels/verification.txt"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "Versioned ltsealed ticket foundation: separate prefix rejected by legacy plain room/node/friend ticket parsers, independent OS-random topic and 32-byte key, redacted Debug, bounded metadata and parsing, strict version/trailing-byte rejection. Ten native ticket tests passed in the isolated capped builder. No sealed transport or plugin behavior is enabled yet. Added XChaCha20-Poly1305 complete-frame codec, random 24-byte nonce, signed ciphertext, topic/sender associated-data binding, strict bounded decrypt parsing, and plaintext downgrade rejection. All 88 native core unit tests passed, including all eight current frame shapes, wrong key/topic/sender, every ciphertext-byte alteration, every truncation, bad signatures and oversized payload refusal. Codec only: no Node sealed rooms or plugin behavior enabled; separate history snapshots and file bytes still require encryption. Encrypted history snapshot codec now uses a distinct LTHSEAL1 domain, provider-signed ciphertext, preserved/reverified original author records, strict channel/key/provider binding and a separate bounded encrypted-size cap. All 90 current core unit tests passed, including real two-node relay-disabled loopback Bao transfer/decryption, wrong-key and size refusal, plaintext downgrade rejection, every packet byte altered/truncated, maximum 256-record snapshot and inner-room mismatch. Ordinary automatic history remains plain and explicitly uses no sealed ticket; sealed Node integration is still pending. Native integration now creates/joins Custom sealed channels, preserves sealed tickets, centralizes encrypted greetings/presence/broadcasts, sends sealed history records without plaintext fallback, encrypts automatic history requests/offers/snapshots and verifies cached encrypted provider offers. Explicit channel_reseal makes a fresh topic/key; selected linked-friend invitations accept sealed tickets but do not autojoin. Persistent topic/key-fingerprint admission prevents ordinary/wrong-key joins to sealed local topics, with live mixed-mode refusal and a bounded 2048-packet recent replay window (not persistent protection after restart/eviction). All 104 current native tests passed: 92 core, 6 friend and 6 two-node, including actual encrypted catch-up before join, original-author preservation, greeting/update presence, repeated signed lines, private selected-friend sealed invite/chat and resealed-channel chat. File publication and incoming file offers are temporarily refused until file-byte encryption is implemented. No optional ABI/plugin lock UI, optimized DLL, real game or release proof yet. Sealed file refusal replaced by actual encrypted file import/offer/authenticated bounded decrypt/save. A separate LTFSEAL1 domain binds file provider/topic/key; new append-only SealedBlobOffer carries plaintext and encrypted sizes inside sealed frames. No plaintext blob is imported by the new API. Ordinary imports cannot be shared in sealed channels, generic fetch rejects sealed files, and encrypted imports cannot be reused after reseal or offered outside their channel. Existing cancellation/withdrawal/block/leave jobs retain their guards. All 105 native tests pass (93 core, 6 friends, 6 two-node), including actual 65537-byte decrypted transfer, overwrite refusal, withdrawal preserving saved bytes, maximum 16 MiB encrypted cancellation terminal integrity and old-file/new-key refusal. Two C ABI history/sealed tests pass with actual encrypted transfer through four optional ABI-2 exports. Managed binding build has zero warnings/errors; all 15 binding tests pass against the newly built debug Linux library, including sealed creation/join/file/withdrawal/reseal. A focused test against the previous optimized Linux library passes and proves all four new methods clearly report unsupported. Initial invocation used the Windows output directory; the corrected Linux-subdirectory invocation passed. Native debug library is a private test artifact, not an installed or released binary. Plugin UI/routing and optimized Windows/game proofs remain pending. Plugin source now recognises sealed tickets distinctly, explicitly guards join/rejoin/create on optional native capabilities, displays [locked], and offers a reseal popup with initially empty linked-friend selection. Service rechecks selected link/block state, queues invitations only to selected friends, keeps the new room on partial invitation failure, preserves old room/history access and inherits mute state. Sealed upload routing uses immutable worker snapshots and BlobAddSealedBytes with existing quotas/admission guards. All 120 Core tests pass and plugin build has zero warnings/errors. No actual ImGui/framework/game runtime proof; build used previous optimized DLL without sealed exports, so a current optimized native build is required before controls become available. No install/publication. Optimized Windows/Linux builds now pass with locked dependencies and nostr enabled after correcting a missing crypto-common -> rand_core lock edge without version changes; all 35 native input hashes match source. All 16 managed tests pass with no skips on the optimized Linux library. New sealed returning-member test recovers three original signed records through cached encrypted provider offers after creator shutdown, history clear and recipient restart with the old creator-only ticket; first-time cold discovery remains unproven. Disposable Wine passes sealed export/ticket/encrypted import/reseal checks plus existing ordinary private friend-file exact transfer/cancellation/withdrawal with explicit loopback routes. This is not sealed Windows peer-to-peer transfer proof. Plugin current-DLL build has zero warnings/errors. Uninstalled/unpublished six-file API-15 preview is byte-verified at ../xiv-lantern-build/vote-preview-sealed-channels/latest.zip, SHA256 d8f9c5f610c382880a241200473d07484ef700c0c2cf280246527e32e34bfe3c. Actual UI/framework/game/loading and release gates remain unproven. Follow-up: sealed conversation IDs now use a SHA-256 digest of the canonical private ticket rather than exposing the bearer ticket in conversation metadata; existing sealed mute IDs normalize at config load, retaining mute/unread policy. Full ticket bootstrap variants still have distinct conversation identities; saved private channel tickets remain unencrypted locally. Two new regressions bring Core to122 passing tests; optimized bindings16 pass without skips and plugin builds with zero warnings/errors. The actual two-instance Windows DLL Wine fixture now proves original signed sealed history, byte-exact decrypted65537-byte transfer, generic ciphertext fetch refusal, overwrite preservation, withdrawal, new-key isolation and16MiB cancellation on explicit localhost-only synthetic routes. This is not actual Windows/game or automatic discovery certification. Fresh local preview vote-preview-sealed-conversations/latest.zip has exact six entries matching current assemblies/source API15 manifest/native DLL and identical version-named bytes; SHA256 cdf444787223d8172572e7a41cde42e84a612c76ff8abd434ab987abc4598d09. Uninstalled/unpublished; no game-chat commands entered. Replaced text-only locked marker with Dalamud icon-font lock in channel list and chat header, with tooltip covering encrypted messages/history/files, bearer-ticket access and unencrypted local storage. Plugin Release build passes zero warnings/errors; actual icon rendering/game input remains unverified. Fresh local uninstalled/unpublished vote-preview-sealed-lock-icon/latest.zip passes exact six-entry/current-byte/API15 and identical version-ZIP checks; SHA256 6cfed351ef94c22ffa9e7472cb3f0782ccde26ead9464b3ab4e9050dfe2f1c5d. Reseal dialog now names its source channel, excludes blocked friends and exposes unavailable selected recipients with explicit removal, so a disconnect/block during review cannot strand an invisible selection. Cancel clears the pending source and selection. Existing service-side current-channel/linked/unblocked checks remain before new-key creation. Release build passes zero warnings/errors and whitespace check passes; actual ImGui transition/game behavior remains unverified. Existing previews are immutable and predate this dialog follow-up. Invitation retry UI now disables unavailable friend links, marks sealed channels with the icon and explains ticket access. Service validates that the source channel remains joined and the current recipient remains linked/unblocked before native queueing; unsupported sealed libraries fail clearly. Local conversation says invitation queued rather than claiming delivery. Plugin Release build and whitespace checks pass with zero warnings/errors; actual game-menu and delivery verification remain open. Immutable prior previews predate this follow-up; no real invitations or game-chat commands sent. Current combined follow-up: saved-copy withdrawal now retains Withdrawn metadata and shows that the local copy remains, with idempotent/retry-refusal regression. Core122 tests pass; optimized bindings16 pass without skips (including friend/plain/sealed withdrawals); Release build zero warnings/errors. Local vote-preview-file-withdraw-ui/latest.zip includes current reseal/invite/outgoing-file UI sources, passes exact six-entry/current-byte/API15 and identical version-ZIP checks; SHA256 7713815f6f1b006f570fb58ab94367d490787842c87697af777baed6d18059ed. Uninstalled/unpublished; actual game UI remains unverified; no real recipients/game-chat commands used.",
+      "remaining": [
+        "Verify actual lock/reseal/create UI, selected-friend delivery, encrypted uploads and framework lifecycle/selection races",
+        "Sealed Windows peer-to-peer file/history verification and broader native feature/interoperability regressions; first-time unreachable-creator discovery remains unproven",
+        "Current package in-game verification, including loading transitions and restricted chat-channel safeguards",
+        "Published release and certification"
+      ]
+    },
+    {
+      "id": "lantern-pull-timer",
+      "title": "Channel Pull Timer",
+      "status": "in-progress",
+      "evidence": [
+        "src/XivLantern.Core/PullCountdown.cs",
+        "src/XivLantern.Core/Commands.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/PullTimerOverlay.cs",
+        "src/XivLantern.Plugin/PullChime.cs",
+        "src/XivLantern.Plugin/Notifier.cs",
+        "src/XivLantern.Plugin/Plugin.cs",
+        "tests/XivLantern.Core.Tests/PullCountdownTests.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "bindings/csharp/Lantern.Tests/Lantern.Tests.csproj"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "Windows/Wine native integration and in-game overlay, completion toast, mute/disable and chime verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "All 76 Core tests pass, including 16 pull parser/timing/destination cases. Pull envelope is readable/versioned and carries only a canonical 1–60 second duration. Service routes the command to an exact joined/open/unique channel, refuses ambiguity/mutes/disabled state, sends through the existing RoomSend path and starts on receipt. Active timers cannot be restarted by a flood; completion is once-only and suppressed after long suspension. The noninteractive overlay, completion toast and optional asynchronous system-notification chime are wired. No game countdown or game chat command is emitted. Managed Release build passes with zero warnings. Peer delivery is verified through the Linux release library and the local package is checked; game UI/audio remain unverified.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-share-screenshot",
+      "title": "Pass a Picture Along",
+      "status": "in-progress",
+      "evidence": [
+        "src/XivLantern.Core/FileOffers.cs",
+        "tests/XivLantern.Core.Tests/FileOfferTests.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-offer-core-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-offer-plugin-build.log",
+        "crates/lantern-core/src/bounded_blob.rs",
+        "crates/lantern-core/src/node.rs",
+        "crates/lantern-core/tests/two_node.rs",
+        "include/lantern.h",
+        "bindings/csharp/Lantern/LanternNode.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-cancel-final-native-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-cancel-core-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-cancel-final-plugin-build.log",
+        "src/XivLantern.Core/FileDownloads.cs",
+        "tests/XivLantern.Core.Tests/FileDownloadTests.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-download-directory-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-download-ui-build.log",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-old-library-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-downloads-optimized-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-downloads-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-downloads-mixed-version-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-downloads-final-plugin-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-offer-snapshot-tests.log",
+        "tests/wine/abi_smoke.c",
+        "tools/test-wine-container.sh",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-exports-wine-smoke.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-native-offer-cap-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdraw-core-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdraw-two-node-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdraw-plugin-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdraw-leave-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdraw-reoffer-tests.log",
+        "tests/native/mixed_version.c",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdrawal-managed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdrawal-mixed-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-file-sharing/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-file-sharing/verification.txt",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-file-sharing/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-storage-budget-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-storage-budget-plugin-build.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/file-withdrawal-workspace-tests.log",
+        "crates/lantern-core/tests/friends.rs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-file-wire-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-file-transfer-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-file-ffi-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-file-binding-build.log",
+        "src/XivLantern.Core/FileOffers.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "tests/XivLantern.Core.Tests/FileOfferTests.cs",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-file-old-binding-tests.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/friend-files-optimized-build.log",
+        "../xiv-lantern-build/native/friend-files-optimized-build.log",
+        "../xiv-lantern-build/native/friend-files-managed-tests.log",
+        "../xiv-lantern-build/native/friend-file-exports-wine-smoke.log",
+        "../xiv-lantern-build/native/friend-files-mixed-tests.log",
+        "../xiv-lantern-build/native/friend-files-plugin-build.log",
+        "../xiv-lantern-build/native/friend-files-legacy-frame-tests.log",
+        "../xiv-lantern-build/native/file-preview-core-tests.log",
+        "../xiv-lantern-build/native/file-preview-final-plugin-build.log",
+        "../xiv-lantern-build/vote-preview-friend-files/verification.txt",
+        "src/XivLantern.Core/ImagePreview.cs",
+        "src/XivLantern.Plugin/FilePreview.cs",
+        "tests/XivLantern.Core.Tests/ImagePreviewTests.cs",
+        "../xiv-lantern-build/native/friend-file-removal-tests.log",
+        "../xiv-lantern-build/native/file-admission-removal-regressions.log",
+        "../xiv-lantern-build/native/file-admission-optimized-build.log",
+        "../xiv-lantern-build/native/file-admission-managed-tests.log",
+        "../xiv-lantern-build/native/file-admission-mixed-tests.log",
+        "../xiv-lantern-build/native/file-admission-plugin-build.log",
+        "tests/wine/file_transfer.c",
+        "crates/lantern-core/examples/wine_address_hint.rs",
+        "../xiv-lantern-build/native/file-admission-wine-transfer-tests.log",
+        "../xiv-lantern-build/native/file-admission-wine-transfer-diagnostics.log",
+        "../xiv-lantern-build/native/file-admission-wine-loopback-transfer-tests.log",
+        "../xiv-lantern-build/vote-preview-file-admission/verification.txt",
+        "src/XivLantern.Core/SharedFileCache.cs",
+        "tests/XivLantern.Core.Tests/SharedFileCacheTests.cs",
+        "../xiv-lantern-build/native/shared-cache-final-core-tests.log",
+        "../xiv-lantern-build/native/shared-cache-managed-tests.log",
+        "../xiv-lantern-build/native/shared-cache-final-plugin-build.log",
+        "../xiv-lantern-build/vote-preview-shared-cache/verification.txt"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "Offer intake is now a bounded session model: 128 total/eight per peer, strict unique-field native JSON metadata, 16 MiB advertised-size admission, known unmuted room and unblocked/unmuted sender checks. Duplicate room/peer/hash offers are suppressed. Intake never fetches. Explicit-click state allows two concurrent downloads and rechecks admission; destination is a random local .download name, never a remote name/extension or native completion payload. Stop/leave/block/mute clear relevant offers. All 103 Core tests pass and plugin builds with zero warnings/errors. No actual file transfer/UI/thumbnail/cleanup is implemented by this revision. Source audit found the existing native downloader fetches a full blob without a verified-size cap; advertised size alone is insufficient. Native bounded-stream admission, cancellation and resource cleanup must precede enabling a download button. No real peer/game interaction, installation or publication. Bounded native transport source now checks exact offered/Bao header size before payload allocation, caps 16 MiB and 30 seconds, verifies content hash without generic blob disk cache. Its synthetic local read-only-provider test passes for valid bytes, oversized offer, lying size and missing hash. All 78 default native Core unit tests pass. Node.blob_fetch_bounded reserves one of two slots before queueing, checks sender block status before/after network, creates a new destination and removes partial output on write error. Optional lt_blob_fetch_bounded and C# SupportsBoundedFileFetch/BlobFetchBounded are added; older libraries fail explicitly rather than falling back. Managed plugin build passes with zero warnings/errors. Strengthened actual two-node and C ABI/header regressions are running in file-bounded-two-node-tests.log after fixing test-call argument borrows. Explicit cancellation and atomic cleanup on shutdown/block/leave/mute during a write remain unproven; no download UI enabled or optimized native artifact built yet. Strengthened actual two-node suite completes: all five tests pass, including byte-exact bounded remote transfer, refusal to overwrite an existing local file and synchronous blocked-sender rejection. All eight FFI unit/header contract tests also pass. These are default-feature Linux debug-source tests; optimized C ABI call-through, optional-feature regressions, Windows/Wine and game proof still remain. Bounded transfers now register cancelable queued jobs, reject concurrent duplicate handles and signal cancellation on sender block/node close. Optional lt_blob_cancel_bounded and managed binding expose request semantics: terminal completion can race cancellation. Native partial-file ownership closes the handle before cleanup on failed/canceled task exit. Focused native tests pass for cancellation retained before worker start, unregister-on-drop and cleanup after task abort, along with bounded transport/history regressions (six filtered native tests), all five actual two-node tests and all eight FFI/header tests in file-cancel-final-native-tests.log. These do not certify all operating-system async-open/write shutdown races or Windows cleanup. All 104 managed Core tests pass, including cancellation retaining a slot until a terminal event and successful completion racing cancel. Final plugin build passes with zero warnings/errors. Download UI and optimized native binaries remain unbuilt; saved previews predate file sharing. Channel UI now renders received file offers with explicit Download/Retry, Cancel and Copy saved path controls. No file opens or decodes automatically. Downloads prepare the config downloads directory on a background worker, reject observed symlink/reparse ancestors, recheck current room/block/mute policy before queueing, and use optional bounded native API only. Cancel during local preparation prevents queueing; destination equality rejects stale preparation callbacks after retry. Native queued-handle tracking distinguishes completion from local blob-add events, and cancellation keeps active state until terminal outcome. Leave/block/mute request cancellation before forgetting offers; frame reconciliation covers folder mute changes. Completion text cannot choose the saved path. All 106 Core tests pass, including actual Linux symlink-folder rejection; final plugin build is clean (file-download-ui-build.log). This is source/build proof only: the currently selected name-card native DLL predates bounded exports, so its download buttons remain disabled. Native rebuild/call-through and actual framework/UI/game proof are still required. Send picker/offer confirmation, friend-link transfers, thumbnails, cleanup/quota and Windows directory/cancellation races remain incomplete. Parent-directory checks assume local control and do not eliminate adversarial replacement races. Added actual C# ABI regression for bounded remote file bytes, strict offer-model intake without transfer, existing-file preservation, blocked-sender admission and cancel-export invocation. The existing name-card-limit native library passes all 12 C# binding tests, including clean NotSupported rejection of both bounded operations and a still-live node (file-old-library-managed-tests.log). This validates the older-library path only; the new transfer branch has not run yet. Optimized Windows/Linux build with nostr feature is currently live in file-downloads-optimized-build.log, with separate native/file-downloads/ output. Earlier checked previews remain preserved. Optimized native build completes with nostr under native/file-downloads/: Windows f985f86d1c405747be54211d48ab1c2d86c1d6060137e8cbc0c5d093c3eff4d8; Linux faa07ceb6bcb1b1ba48421399b4fd5652a168f246ea3cc8101cdd32fe4d03097. All 12 binding tests pass against the exact optimized Linux library, exercising the new bounded C ABI/managed path with byte-exact remote content, overwrite refusal, blocked sender and cancel-export failure on unknown handle. Actual legacy interoperability passes. Final plugin build against the new Windows DLL has zero warnings/errors. Wine smoke executable prints PASS for existing signed history/name-card/direct checks, with wrapper cleanup still live at last observation; this harness does not yet exercise bounded file exports/transfer. Channel send now offers a full-path field with explicit privacy warning and confirmation, worker-only capped immutable file snapshot, background native byte import, bounded early hashing-completion handling, current-channel/mute recheck before offer, one preparation at once and conservative 64 MiB/16-file session cache limits. All 107 Core tests pass. Actual framework/send UI races and in-game behavior remain unverified. Nothing installed or published; no real recipient/relay/domain or game-chat interaction. Wine wrapper subsequently completes with exit zero. Prefix refresh timed out before the successful executable, as with prior runs; no Windows bounded-transfer claim. Windows ABI smoke now has an explicit optional required-file mode (LANTERN_TEST_FILES_REQUIRED=1), resolving bounded fetch/cancel and checking null/unknown job refusal without destination creation. Existing older-library mode remains available. The revised harness is running in file-exports-wine-smoke.log; no passing Windows bounded-export claim yet. It does not test full Windows transfer or mid-write cancellation. Revised isolated Wine wrapper completes with exit zero, including bounded-file export resolution and null/unknown job rejection without file creation (file-exports-wine-smoke.log). This is not a full Windows bounded transfer. Native incoming offer audit found the previous shared.blobs map unbounded despite UI caps. Current host source now admits at most 128 remote offers/eight per sender, rejects control/oversized names and suppresses exact room/sender/hash repeats before allocating another handle. Room scope is retained in BlobState; local files remain separate. The focused native cap test passes in file-native-offer-cap-tests.log; actual two-node regressions are running. Optimized libraries above predate this cap revision. Retraction/room-leave/expiry cleanup for native remote metadata is still required before treating bounded retention as complete. The cap revision subsequently passes all five actual two-node regressions, including bounded byte-exact download and overwrite/block behavior. No optimized cap rebuild yet. Remote offer withdrawal now frees native metadata and signals active bounded jobs, scoped by authenticated sender/room/hash. Room leave removes its remote metadata and cancels its jobs. Room read admission stays held through offer insertion/emission; leaving removes the room before cleanup, preventing offers retained after a leave race. New appended ABI-2 event 41 BlobWithdrawn removes unused UI offers; active offers remain Canceling until terminal cleanup and failed withdrawn transfers disappear. Saved local files remain available. All 108 Core tests pass, plugin builds cleanly, eight FFI/header tests pass and all five actual two-node tests pass including withdrawal event and stale-handle rejection. A further reoffer/fresh-handle/room-leave rejection regression is running in file-withdraw-leave-tests.log. Optimized native binaries still predate native cap/withdrawal revisions; expiry policy, full Windows transfer, friend offers, thumbnails and configurable storage cleanup remain open. Extended reoffer/leave regression failed waiting for a fresh offer: gossip deduplicates the identical original offer packet after withdrawal. This is a real bug, not a cleanup-test timeout to waive. Source now signs a random 16-byte suffix on existing BlobOffer/BlobUnoffer frames, retaining the decoded frame shape while making repeat publications distinct. RNG failure reports an error rather than emitting an identical packet. The first rebuild exposed an ambiguous .into() at the error call; fixed. The corrected real two-node reoffer/leave test is now running in file-withdraw-reoffer-tests.log. New random-suffix compatibility and optimized rebuild remain unproven. Corrected reoffer/leave suite completes successfully: all five two-node tests pass, including withdrawal event, old-handle rejection, same-file reoffer with a fresh handle, and native fetch rejection after channel leave. Actual mixed-version suffix compatibility and optimized rebuild still remain. Focused signed-suffix test passes: repeated offer and withdrawal packets differ, current decode and legacy-shaped postcard decode recover the original frame, and changing suffix bytes invalidates the signature. This is format-level compatibility, not actual old-library interoperability. The optimized native rebuild is live in file-withdrawal-optimized-build.log with separate native/file-withdrawal/ output. The C# test is extended to observe event 41, reject a withdrawn handle, accept same-file reoffer with a fresh handle, and reject fetch after leaving. That extended call-through branch has not yet run against the new optimized DLL. Optimized withdrawal/cap/reoffer build completes under native/file-withdrawal/: Windows d376e39efdbd55898bb7034f42c61a43131af6ae95534afe7db6fe93d4103395; Linux 8c5ad0e128e9c799667bd1c895dbff6e06bf40535035b1ea1ee6966ed228cec9. All 12 actual C# binding tests pass against this exact Linux library, including byte-exact download, overwrite/block rejection, event 41 withdrawal, fresh-handle same-file reoffer and fetch rejection after leave. Mixed-version fixture now actually loads independently built pre-tag/current libraries and proves repeated signed file offers reach the older library; existing friend/presence/chat/signed-history checks also pass. Isolated required-name-card/file-export Wine smoke and final plugin build are running in file-withdrawal-* logs. Full Windows file transfer/cancellation, framework/UI/unload, thumbnails, friend offers and cleanup/game/release gates remain open. Final plugin build against the optimized withdrawal Windows DLL completes with zero warnings/errors. Default and nostr/calls full native workspace regressions are now running sequentially in file-withdrawal-workspace-tests.log; do not mutate /build while that Cargo process is live. Wine wrapper remains live. No new checked preview package yet. Required Windows export/history/name-card smoke subsequently completes with exit zero against the withdrawal DLL. Prefix refresh timed out, but the actual executable passed afterward; full Windows file transfer remains unverified. Separate vote-preview-file-sharing/latest.zip passes exact six-file, built-byte, source manifest API 15/version 0.1.0.3 and optimized withdrawal DLL checks. SHA256 63b5fa0aaf69f48cdb94c90568c029773d8e0d0ecff0ea1fa4ba0ace27b0acfa. This local development preview is uninstalled/unpublished and incomplete: thumbnails, friend offers, storage cleanup and actual Windows transfer/framework/game verification still remain. Full native workspace regressions are still running; previous checked previews remain preserved. Managed disk admission now counts flat download-folder files and conservatively reserves both 16 MiB transfers before queueing. Default budget is 256 MiB, configurable in Settings from 32 to 1024 MiB. Budget/entry-count overflow rejects new transfers without deleting existing files; linked files and observed linked ancestors are refused. All 109 Core tests pass, including sparse-file boundary admission/refusal and preservation of saved files. Plugin build is clean. The checked file-sharing preview predates this budget revision. Automatic cleanup, quota behavior during actual framework concurrency and adversarial local path replacement remain unverified. Default native workspace test phase completed successfully; optional nostr/calls phase is still compiling in file-withdrawal-workspace-tests.log. Cleanup setting is now opt-in: DownloadRetentionDays defaults to zero; 1–90 days removes only expired Lantern GUID-N .download files before a new preparation. Active/preparing paths and unrelated names are preserved, and successfully deleted saved paths are removed from the UI. Cleanup and quota scans serialize under a worker-only fileStorageGate, never on the frame thread. Cleanup snapshots/count-checks the directory before deletion and preserves inaccessible/locked files outside its success results. Settings text reflects budget and retention separately. All 110 Core tests pass, including retention preserving active and unrelated files; current plugin build has zero warnings/errors and diff whitespace check passes. These are host tests/source-build evidence; actual framework concurrency, Windows filesystem races and game behavior remain unverified. The checked file-sharing preview predates budget/retention changes. Optional native workspace regressions remain live, now executing tests after compilation. Full native workspace command now completes with exit zero: 239 successful tests across sequential default and nostr/calls configurations (112 default; 127 optional), including CLI, Core, FFI and integration suites. No failures. This validates the withdrawal native source; it does not cover current managed cleanup runtime or missing features. Native friend-link file foundation now appends FileOffer/FileWithdraw after all existing Wire variants, retaining legacy numbering. Offers use authenticated friend identity, refuse unknown friends, cap size at 16 MiB, reuse native remote metadata bounds and emit room-zero offers without any automatic fetch. Withdrawal is scoped to that friend/hash and preserves saved local files. All six friend wire unit tests pass, including appended enum indexes and unchanged heartbeat bytes. A new direct friend offer/explicit bounded download/withdraw test is running in friend-file-transfer-tests.log using synthetic private nodes and disabled public relays. No C ABI/managed/UI friend-offer path or optimized friend-file rebuild yet. Direct friend-file native integration passes: authenticated offer with room zero, no automatic fetch, exact 65537-byte bounded download, scoped withdrawal retaining saved bytes and stale-handle rejection. All eight FFI unit/header tests pass after adding optional lt_friend_file_offer/lt_friend_file_withdraw exports. Managed dynamic bindings require both exports plus bounded fetch/cancel support, validate 32-byte peers and throw cleanly on older libraries rather than falling back to channel invitations. Plugin build succeeds with zero warnings/errors. These tests do not yet call the new friend exports through C#; no optimized friend-file rebuild, friend UI or full Windows transfer proof yet. Existing checked preview remains unchanged and predates this foundation. Friend chat UI now shares the explicit file confirmation, download/cancel controls and storage preparation. Room-zero metadata is admitted only for a current known friend, with current block/mute checks and no automatic fetch. Outgoing friend preparation requires linked/unmuted/unblocked state and rechecks it before the native offer; status says queued/unconfirmed rather than claiming delivery. Popup target is captured when opened and closes if conversation changes. All 111 Core tests pass, including room-zero origin admission/no-fetch, and plugin build is clean. Current optimized DLL lacks friend-file exports, so friend-send controls remain disabled until rebuild. Actual C# friend-transfer call-through, popup/framework/Windows/game behavior and friend-device mapping remain unverified. Checked preview still predates retention and friend UI. Added C# friend-file end-to-end regression for authenticated room-zero metadata, explicit bounded byte-exact fetch, withdrawal event, saved-file preservation and stale-handle rejection. All 13 binding tests pass against the older name-card-limit library, validating the clean unsupported friend/bounded paths only. Current native friend-file integration passes after holding friend admission through offer insertion/emission and clearing retained room-zero metadata on local/remote unfriend. Full optimized friend-file build is now running in friend-files-optimized-build.log under separate native/friend-files/ output; do not mutate /build while Cargo is live. New-export C# transfer branch, Windows friend exports and actual unfriend-with-active-transfer behavior remain unverified. Optimized friend-file Windows/Linux build now completes successfully in friend-files-optimized-build.log. All 13 managed binding tests pass against native/friend-files/linux, including the new friend exports: authenticated room-zero offer, no automatic fetch, explicit exact-byte download, withdrawal retaining saved bytes and stale-handle rejection. Windows Wine smoke completes with exit zero and validates both friend-file entry points plus null/unknown-friend rejection; it does not exercise Windows friend transfers. Existing actual archived-library room/chat/history compatibility fixture passes against the new Linux library; it does not yet send the newly appended friend-file Wire variant to the old peer. Final plugin build against the optimized friend DLL passes with zero warnings/errors. Current checked preview remains older; active-transfer unfriend, multi-device friend mapping, thumbnails, full Windows transfer and framework/game/release gates remain open. Actual archived-library friend-frame compatibility fixture now queues a new friend-file offer to the old friend, polls for a bounded interval, then verifies continued presence and bidirectional chat; it has no receipt acknowledgment for that unknown legacy frame. Preview UI now requires an explicit Preview image click after a saved download; reads a capped immutable local snapshot on a worker, strips PNG ancillary/JPEG APP/COM metadata, admits static non-interlaced 8-bit PNG or single-scan baseline JPEG only, bounds each side to 4096 and pixels to 8 Mi, and validates PNG decompression against the exact scanline budget before the platform decoder. One owned texture is retained; explicit larger-preview control opens inside Lantern, and unload cancels work/disposes late texture results. All 116 Core tests pass, including real Pillow-generated PNG/baseline/progressive JPEG fixtures, metadata stripping, malformed/truncated/oversize dimensions, APNG and compressed PNG excess. Plugin build passes with zero warnings/errors. This is admission/source-build evidence, not a proof of platform decoder allocation safety, actual texture rendering or unload races. Separate checked local vote-preview-friend-files/latest.zip matches exact six current files and optimized friend DLL; SHA256 1fc45108682f47a99b052e4a2ff89bb5d3e7d61952e6c9a6016e1cfcc4eff1fc. Uninstalled/unpublished. Previous previews are preserved. Follow-up native admission audit found a withdrawal/register gap between reading retained metadata and registering the download cancellation sender. Source now holds blocked-state and blob-read guards through registration, so withdrawal/unfriend waits and can signal every admitted job. Room and friend offer insertion holds blocked admission through emission. Block clears all remote offers synchronously; local unfriend clears room-zero offers before returning. All six friend integration tests pass with immediate removal/stale-handle and unblock-not-resurrecting checks in friend-file-removal-tests.log. A stronger 16 MiB active-transfer removal/block fixture plus deterministic registered-job cleanup/local-blob preservation unit test and existing two-node suite are now running in file-admission-removal-regressions.log. The checked friend-files preview predates these native admission fixes; no optimized rebuild of this revision yet. Active-transfer outcome and Windows/source rebuild gates remain unverified. Admission/removal regressions now complete with exit zero: one registered-job cancellation/local-blob-preservation unit test, all six friend integration tests including removal/block during a queued 16 MiB fetch, and all five actual two-node room tests. The active-transfer fixture accepts a completion that wins the race only if exact bytes remain intact; failed/canceled transfers must leave no partial destination. It does not force a particular worker scheduling boundary or certify Windows cleanup. New optimized Windows/Linux build is running separately in file-admission-optimized-build.log with /native/file-admission output; do not mutate /build while Cargo is live. Existing checked preview is preserved and predates this native revision. Optimized admission-fix rebuild now completes successfully: Windows SHA256 4a58d9c135868b440ee7c280c2bf9aa6dd1031a60cd0cebf425799fe8082e444; Linux 0c2e6cda0714991d5fe2f4e766ca01039b8a532d2ed1d75f1922c7a1dfd6c973. All 13 binding tests and the actual archived-library compatibility fixture pass against this Linux output. Plugin builds with zero warnings/errors. Separate vote-preview-file-admission/latest.zip passes exact six-file/current-byte/manifest/native checks, SHA256 274c7a151b2c1889123672704a3864ddfc2ec741ba5840e642512d253ecebd5b. Local uninstalled/unpublished, prior previews preserved. New Windows private-peer actual transfer/overwrite/withdrawal/16 MiB queued cancellation/unfriend fixture has compiled under MinGW Wall/Wextra/Werror and is running through the isolated Wine wrapper in file-admission-wine-transfer-tests.log. Result remains pending; no full Windows transfer claim yet. First actual Windows transfer run exits one before any file offer: synthetic peers time out establishing friendship. Existing Windows export/history/name-card/selftest checks passed first. Failure log is preserved; it is not transfer proof. Fixture now warms each asynchronous endpoint with a direct selftest before minting its invite, omits bearer ticket contents, reports only ticket length and invite-failure reasons, and reruns in file-admission-wine-transfer-diagnostics.log. Current diagnostic run remains live; determine Wine address discovery versus client behavior before claiming Windows transfer support. Diagnostic Wine run exits one with a precise pre-transfer failure: InviteFailed says No addressing information available, despite direct selftests succeeding; the generated endpoint ticket length is 61. This is address discovery evidence, not a file-transfer failure. Added offline test-only wine_address_hint example using the real NodeTicket codec and only synthetic public ids/bound UDP ports; the Windows C fixture applies reciprocal localhost hints through existing lt_address_hint, with no production discovery changes or public relays. That full isolated wrapper now exits zero in file-admission-wine-loopback-transfer-tests.log: Windows optimized DLL establishes authenticated private friendship, admits room-zero offer without automatic fetch, saves exact 65537 bytes after explicit request, refuses overwrite while preserving existing bytes, emits scoped withdrawal and rejects stale handles, then handles queued 16 MiB cancellation and unfriend with an intact completion or no partial file. Existing Windows signed-history/name-card/bounded/friend export checks pass in the same run. This covers explicit localhost routes under Wine, not automatic Wine address discovery, NAT, relay paths, cancellation at a forced mid-write boundary, shutdown races or actual Windows/Dalamud/game behavior. Serving-cache audit confirms pinned iroh-blobs FsStore options default gc=None; the former session limit did not bound persistent cache across restarts. Added worker-only native-cache disk admission under fixed config/lantern.blobs, with configurable 64–1024 MiB budget (default256), all-file byte accounting, 4096-entry cap, observed-link/unknown-layout refusal and two-file-size reservation for data/outboard/database growth. It is an admission budget, not a proof of hard native allocation bounds. Sharing rechecks this cache before reading/importing the selected file. Off-only explicit Clear shared-file cache control preflights only known blobs.db/data/temp names before deleting cached copies; originals, identity SQLite and downloads are outside that directory. No recursive deletion: late-added entries cause refusal rather than being swept. Clear waits for background tasks and queued framework actions, blocks new start while busy, and is disabled after a native close exception. Start now also refuses while Stopping. No automatic cache deletion was introduced. All 120 Core tests pass, including sparse persisted-budget headroom, full-preflight unknown/4096-entry refusal, observed Linux links and preservation of identity/download/original files. All14 C# binding tests pass, including an actual native FsStore import/close/cache-clear/reopen retaining the same identity and saved download. Final plugin builds with zero warnings/errors. Separate checked local vote-preview-shared-cache/latest.zip matches six exact current built files, manifest and optimized admission DLL; SHA256 e470cc72586e535207b3b598b3a8e90500aafd9a38bd4292cded18072a6433ed. Uninstalled/unpublished; prior previews preserved. Actual Windows cache filesystem behavior, callback/unload lifecycle, hard allocation quotas and adversarial ancestor replacement remain unverified. Added sender-side outgoing offer rows for friend/plain/sealed channels, displaying admitted snapshot name and plaintext size only after native offer queueing succeeds. Withdraw calls existing FriendFileWithdraw/BlobUnoffer, removes the row only after native acceptance, works while muted and states queued rather than delivered. Already downloaded copies and local cache are preserved; cumulative session quotas do not reset on withdrawal. Session stop/channel leave/friend removal/block clear applicable outgoing metadata. Release build passes zero warnings/errors and whitespace check passes. Prior native/Wine withdrawal tests remain unchanged-native evidence, not actual framework/UI proof; actual in-game sender-row/withdraw interaction remains open. No real recipients, game-chat commands, installation or publication used. Older previews predate these source changes. Current combined follow-up: saved-copy withdrawal now retains Withdrawn metadata and shows that the local copy remains, with idempotent/retry-refusal regression. Core122 tests pass; optimized bindings16 pass without skips (including friend/plain/sealed withdrawals); Release build zero warnings/errors. Local vote-preview-file-withdraw-ui/latest.zip includes current reseal/invite/outgoing-file UI sources, passes exact six-entry/current-byte/API15 and identical version-ZIP checks; SHA256 7713815f6f1b006f570fb58ab94367d490787842c87697af777baed6d18059ed. Uninstalled/unpublished; actual game UI remains unverified; no real recipients/game-chat commands used.",
+      "remaining": [
+        "Friend-file multi-device mapping and stronger legacy unknown-frame receipt evidence",
+        "Actual Dalamud PNG/JPEG thumbnail rendering, bounded platform decoding and unload/larger-preview verification",
+        "Hard native allocation quota, actual Windows serving-cache cleanup/lifecycle and adversarial local reparse/parent replacement verification; download retention and serving-cache admission/manual cleanup implemented",
+        "Automatic Wine address discovery, forced mid-write cancellation/shutdown cleanup and actual Windows/framework verification",
+        "Actual framework sending/preparation/retry/cancel/leave/mute/unload and game verification",
+        "Checked local preview package and eventual release gates"
+      ]
+    },
+    {
+      "id": "lantern-voice-sidecar",
+      "title": "Ring a Friend",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-voice-in-process",
+      "title": "Voice Without the Sidecar",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-fc-hearth",
+      "title": "The FC Hearth",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-nostr-mailbox",
+      "title": "Leave It at the Post",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-every-device",
+      "title": "One Friend, Every Device",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-invite-by-npub",
+      "title": "Invite by Name Card",
+      "status": "in-progress",
+      "evidence": [
+        "crates/lantern-core/src/nostr.rs",
+        "crates/lantern-core/src/node/nostr.rs",
+        "crates/lantern-ffi/src/lib.rs",
+        "include/lantern.h",
+        "bindings/csharp/Lantern/LanternEvent.cs",
+        "crates/lantern-ffi/src/nostr.rs",
+        "bindings/csharp/Lantern/Native.cs",
+        "bindings/csharp/Lantern/LanternNode.cs",
+        "bindings/csharp/Lantern.Tests/FriendTests.cs",
+        "src/XivLantern.Plugin/LanternService.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "src/XivLantern.Core/NostrInbox.cs",
+        "tests/XivLantern.Core.Tests/NostrInboxTests.cs",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "src/XivLantern.Core/NameCardLookup.cs",
+        "tests/XivLantern.Core.Tests/NameCardLookupTests.cs",
+        "crates/lantern-ffi/tests/abi_nostr.rs",
+        "tools/build-native.sh",
+        "src/XivLantern.Core/NostrOperation.cs",
+        "tests/XivLantern.Core.Tests/NostrOperationTests.cs",
+        "src/XivLantern.Core/Privacy.cs"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "Implemented opt-in name-card invitation flow: explicitly chosen bounded ws/wss relays, local public npub preparation/copy, npub/nprofile/hex invites, manual inbox checks, and bounded pending accept/ignore UI. Verified nostr sender and exact ticket remain typed events rather than log messages; incoming invites are never redeemed automatically. Pending invites persist only in memory; bounded ignore/accepted fingerprints persist without bearer tickets. Failed acceptance remains retryable; matching native success removes it. Preparation runs on tracked workers serialized with node disposal; controls stay busy through matching relay completion and handle early completion ordering. Email-style lookup uses explicit HTTPS NIP-05 well-known mapping, rejects redirects/cookies/duplicate mappings and URL injection, bounds responses to 64 KiB and ten seconds, displays the domain-claimed public key for a separate Send, and never adopts domain relay suggestions. This identifies a key, not a verified person; reciprocal kind-0 profile checks are unfinished. All 96 managed Core tests pass (name-card-streaming-core-tests.log); all 11 actual final optimized binding tests pass, including local npub/device identity persistence across restart (name-card-final-managed-tests.log). The C ABI local-relay test passes offline delivery to a reopened synthetic recipient, verified sender/ticket, no friendship before explicit acceptance and no reoffer after success (name-card-local-relay-abi-tests.log). Actual legacy-library interoperability passes (name-card-mixed-version-tests.log). Optimized Windows/Linux native build completes with separate native/name-card-invites/ output; Windows SHA256 bd65f55fe22f4813ffac5150e61b6693cc85c7fcee4e9e42edbb179e924d267a, Linux cbd510ad58b73d91d2e04fef1527e7a9485825faaa3ab63d4c6b585771da6bff. x64 PE/name-card/history exports and no extra GCC/C++ runtime imports are verified. The expanded isolated Windows/Wine smoke passes stable local identity, optional exports and invalid-job rejection without relay contact, plus existing signed history/clear checks (name-card-wine-smoke.log); Wine prefix refresh still times out, but actual ABI executable succeeds afterward. Final native-inclusive plugin Release build has zero warnings/errors (name-card-final-plugin-build.log). Local vote-preview-name-cards/latest.zip contains exactly six root files matching current build and source manifest, API15/version0.1.0.3; SHA256 12e6bb43d31097105c401b1681af36b19ddbd790d2f67698118feb7ede655df5 (name-card-package-verification.txt). Final default/optional workspace regression run is live in name-card-final-workspace-tests.log. Actual framework/worker/unload/game/privacy/rendered UI verification, reciprocal name-profile checks and release remain open. Only synthetic identities, HTTP fixtures and an in-process loopback relay were exercised. No public relay, real recipient, real domain lookup, installation, publication or game-chat commands occurred. Catalogue risk audit found additional spam/privacy requirements. Managed pending inbox now allows at most four invitations per verified sender within its 32-total cap; ignored/accepted fingerprints still suppress replays. The reviewed privacy note now explicitly names optional nostr relay operators, encrypted envelope retention, domain lookup IP/name disclosure, local unencrypted identity storage and separate opt-in; peer relays off no longer implies all optional services are offline. All 97 Core tests pass (name-card-spam-core-tests.log), including one-sender saturation and ignore-slot release; plugin build passes with zero warnings/errors (name-card-spam-plugin-build.log). Host native source now requests/decrypts at most 128 envelopes per inbox check and rejects invitations from currently blocked device IDs. These native changes are not yet tested/rebuilt: prior-source full regressions are still live, so /build was not mutated. The checked name-card preview predates this audit revision. Temporal rate limits and malicious-relay fetch-allocation bounds remain open; do not interpret pending/decryption caps as complete spam certification. Prior-source workspace regressions completed successfully. Inbox admission now additionally limits eight per sender and 64 total per 30-second monotonic window; ignore/clear cannot bypass the window, and clock rollback is conservative. All 99 Core tests pass (name-card-rate-core-tests.log) and plugin build has zero warnings/errors (name-card-rate-plugin-build.log). SDK 0.45.4 source inspection found FetchEvents.max_events, now set to 128 alongside server filter/decryption caps; this bounds the SDK fetched-event collection, not every lower-level websocket allocation. New private-relay tests for 129-event fetch rejection and blocked-device invitation suppression are running in name-card-spam-native-tests.log after the prior workspace command finished. The checked preview/native binaries still predate these changes and must be refreshed; no passing native-cap claim yet. First native spam regression run passed the two existing relay integrations but the new 129-event fixture failed during setup because MockRelay rate-limited publishes, before the buffer-cap assertion. Fixture now preloads signed synthetic events directly via MockRelay.add_event. SDK source audit found configurable normalized relay-message/event/tag limits and pool bounds; host source now explicitly limits messages to 128 KiB, events to 64 KiB/64 tags, relays to eight, and notification capacity to 64, alongside the 128-event fetch/decrypt cap. These accepted-message/SDK limits are not a claim about every raw websocket allocation. Corrected native cap/block/relay tests are running in name-card-spam-native-tests.log. Neither these limits nor current block filtering are yet in the checked preview; runtime/native rebuild remains required. Corrected native spam regression now passes all three Core relay integrations and the C ABI offline-recipient case, including blocked-device suppression before inbox events and successful retrieval after unblock (name-card-spam-native-tests.log). Empty-relay error wording was preserved to satisfy the established refusal contract. A new direct private-relay test for oversized and excessive-tag event rejection is running in name-card-relay-size-tests.log before the optimized preview is rebuilt. The checked preview still predates all spam-limit/native-block/privacy revisions. Direct private-relay size/tag test passes: a valid signed event above 64 KiB and a valid signed event with 65 tags never reach the fetch result (name-card-relay-size-tests.log). Together with the three passing relay integrations and passing blocked/offline C ABI test, this validates current source filter/fetch/decryption/accepted-event limits and block admission using only local synthetic fixtures. Optimized Windows/Linux rebuild is now running in name-card-limits-optimized-build.log under separate native/name-card-limits/ output. Previously checked name-card preview is preserved; the new privacy/rate-limit/native-cap revision still needs final optimized binding, compatibility/Wine/package and game checks. Disabled-feature audit adds cancellation tokens to queued preparation and active HTTPS lookup; Stop/unload also cancel preparation. Disabling clears pending/resolved state and stale canceled lookup results cannot restore it. Native relay jobs already queued may finish; UI explains this and matching completion still releases controls. Final plugin build for these managed changes has zero warnings/errors (name-card-cancellation-plugin-build.log), with actual framework/unload behavior not yet certified. Optimized limit revision build completes under native/name-card-limits/: Windows SHA256 e9ce3bddfb8fdb75115dc7567377167b2be9602de48eb2fe4948065e42feddde; Linux 55865cacf5afee24b231a0f6790957c6ea366424b0c72b1b9df8f77b89e23a04. Exact-library C# binding, legacy interoperability and expanded Wine checks are now running in name-card-limits-* logs. The earlier preview remains unchanged and predates this revision. Final optimized limit libraries pass all 11 actual C# binding tests, actual independently built legacy interoperability and expanded isolated Wine ABI smoke (name-card-limits-managed-tests.log, name-card-limits-mixed-version-tests.log, name-card-limits-wine-smoke.log). Wine prefix refresh times out; the actual smoke executable succeeds afterward. Final plugin build against this Windows DLL has zero warnings/errors. New separate vote-preview-name-card-limits/latest.zip passes exact six-file, source manifest API/version and built-byte checks; SHA256 9108c863df3e9346f6bb9512a2e104c5a7b9a418d61862067ca4d6316483c6f6. It includes current privacy, temporal rate limits, native block/event limits and preparation cancellation. Earlier checked preview is preserved. No installation/publication or game/chat interaction. Real framework/worker/unload/UI and game gates remain open; raw websocket allocation bounds and reciprocal NIP-05 profile verification are not certified.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-name-card-limits/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-name-card-limits/verification.txt",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-name-card-limits/checksums.sha256"
+      ]
+    },
+    {
+      "id": "lantern-pocket",
+      "title": "Lantern in Your Pocket",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-safety-words",
+      "title": "Check It Is Really Them",
+      "status": "host-tested",
+      "evidence": [
+        "src/XivLantern.Core/SafetyWords.cs",
+        "src/XivLantern.Core/Resources/eff_large_wordlist.txt",
+        "src/XivLantern.Core/Resources/EFF-WORDLIST-NOTICE.txt",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "src/XivLantern.Plugin/Configuration.cs",
+        "tests/XivLantern.Core.Tests/SafetyWordTests.cs",
+        "tools/package.sh"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "remaining": [
+        "In-game comparison menu, clipboard and verified-mark rendering verification",
+        "Published release and Windows/Wine/game certification; local test package is unreleased"
+      ],
+      "verification_note": "All 60 Core tests pass. Safety comparison sorts validated 32-byte identities and hashes a versioned domain plus both IDs with SHA-256. Four words are selected from a checksum-pinned 7776-entry EFF list; the full digest is available for comparison. Known vector independently computed in Python is pinned in tests; symmetry, hex case, invalid/self identities and mark invalidation when either identity changes are covered. Comparison marks are local and store the full pair digest. No automatic verification, messaging or game command is performed. Managed Release build passes with the existing native-library warning. The attribution notice is embedded and copied into managed output; packaging now requires it, but the native-inclusive zip remains unverified.",
+      "native_build_note": "Current optimized tag build passes all 75 default-feature and 86 optional-feature Rust tests. Windows and Linux release builds complete successfully; Windows PE/tag export and system-only imports are checked. All five C# binding tests pass with zero skips against the optimized Linux library, including authenticated presence transitions and pull/tag delivery. An actual pre-tag/tagged optimized pair retains friendship, presence and bidirectional chat after tag frames. Managed plugin Release build has zero warnings. The local vote-preview-tags package passes required-file, manifest API/version, attribution and exact built-byte checks; checksums are recorded. Pre-tag binaries are retained separately. This is an unreleased local preview. Wine prefix bootstrap times out before DLL execution, even without Rust compilation; Windows and game verification remain pending.",
+      "package_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/latest.zip",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags/checksums.sha256",
+        "/var/home/jack/xivmods/xiv-lantern-build/vote-preview-tags-package.log"
+      ],
+      "native_test_evidence": [
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-build-check.log",
+        "/var/home/jack/xivmods/xiv-lantern-build/native/native-optional-tests.log",
+        "tests/wine/abi_smoke.c"
+      ]
+    },
+    {
+      "id": "lantern-key-passphrase",
+      "title": "Lock the Lantern",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-move-house",
+      "title": "Moving House",
+      "status": "queued",
+      "evidence": [],
+      "in_game_verified": false,
+      "released": false
+    },
+    {
+      "id": "lantern-signed-release-notes",
+      "title": "News From the Lamplighter",
+      "status": "in-progress",
+      "evidence": [
+        "tools/release-announcement.py",
+        "tests/tools/test_release_announcement.py",
+        "src/XivLantern.Plugin/MainWindow.cs",
+        "../xiv-lantern-build/unsigned-release-news-v0.1.0/announcement.json",
+        "../xiv-lantern-build/native/release-news-plugin-build.log",
+        "crates/lantern-cli/src/author.rs",
+        "crates/lantern-cli/src/author/sequence.rs",
+        "../xiv-lantern-build/native/release-news-cli-regressions.log",
+        "../xiv-lantern-build/native/release-news-prepared-signature-fixture.log",
+        "tools/releasekit.py",
+        "../xiv-lantern-build/unsigned-release-news-integrated-v0.1.0/verification.txt",
+        "crates/lantern-cli/src/main.rs",
+        "crates/lantern-cli/tests/demo.rs",
+        "../xiv-lantern-build/native/release-news-file-handoff-tests.log",
+        "../xiv-lantern-build/native/release-news-final-bounded-signer-tests.log",
+        "tools/sign-release-announcement.py",
+        "tests/tools/test_sign_release_announcement.py",
+        "../xiv-lantern-build/native/release-news-local-signing-fixture.log",
+        "../xiv-lantern-build/native/release-news-signing-migration-fixture.log"
+      ],
+      "in_game_verified": false,
+      "released": false,
+      "verification_note": "Existing native signed author announcements and opt-in plugin rendering are present; AuthorIdentity.PublicKeyHex and author node ids remain empty. Added tools/release-announcement.py offline preparation from the same releasekit changelog section/installer summary/full release notes. It enforces native 120-byte title/1500-byte body UTF-8 budgets, preserves whole summary lines and a full-release link, refuses to replace existing output, requires an explicit positive u64 sequence, and writes unsigned/unpublished body, complete notes and structured signing arguments. It never reads keys, signs, opens a node or publishes. All three helper tests pass for multibyte limits/whole lines, invalid sequence/overlong title, artifact status and no overwrite. Actual v0.1.0 draft verifies within limits under ../xiv-lantern-build/unsigned-release-news-v0.1.0; sequence1 is a proposed unsigned draft only and is not reserved or proven newer than existing signed announcements. Each announcement now has a Write to the author button focusing the existing support composer without sending; timestamp rendering also refuses out-of-range claims. Plugin build passes with zero warnings/errors. No actual author key setup, synthetic signing handoff, release automation publication or game proof yet. Offline CLI now adds author verify with expected public key and signed file only: input capped8192 bytes, canonical encoding required, native signature/author verification and escaped sequence/title/body output; verify refuses private-key/body-file/sign-only flags before any read. Author signing now creates private per-key sequence reservations under a sibling .announcements directory, initialized at zero for new keys; locks with create-new, checks recorded author and greatest reserved u64, refuses duplicate/older numbers and override attempts, and reserves before returning the signature. Missing older-key history requires an explicit --previous-seq operator assertion. Crash gaps/stale locks fail closed and are not automatically reclaimed. Unix files0600/dir0700, record and parent-directory sync; no proof of cross-machine rollback/adversarial path races or Windows durability. All five CLI regressions pass (three unit tests including simultaneous same-number reservation, migration/stale lock/key mismatch and sign/verify/tamper rejection; two synthetic relay-disabled CLI integrations). All three offline draft helper tests pass. Actual prepared v0.1.0 body signs and verifies byte-exact title/body using a temporary synthetic key in the isolated builder, duplicate sequence is refused and private permissions verified; no node opened or publication in that fixture. Real author keys were not used or moved into the builder, and the real draft remains unsigned/unpublished. Author identity/node still unconfigured. Release workflow entrypoint now exposes announcement-draft with explicit tag/sequence/fresh output directory, delegating to the offline helper via structured subprocess arguments. It does not call release publication or network verification and does not sign or read keys. All four helper tests pass, including the workflow branch and paths with spaces. An actual invocation prepares ../xiv-lantern-build/unsigned-release-news-integrated-v0.1.0; title, sequence, body and full changelog match the standalone draft exactly, remain unsigned/unpublished, and include a public-only CLI verification argument template. The ordinary release command does not yet automatically reserve/sign or hand off an announcement; no actual release was cut, and author identity/node remain unconfigured. Native CLI now accepts --announce-file only with --author-mode and expected public key. Shared public-only verified_file reads an immutable bounded snapshot and rejects noncanonical/invalid/wrong-author packets before Node::open; no database/network endpoint opens on rejection. Successful startup queues the same verified signed snapshot through author_announce, preserving stored reoffers to late subscribers; status says queued, not delivered to everyone. Offline draft metadata now includes explicit native-node handoff argument placeholders and publication-effect text; preparation does not execute them. All six CLI regressions pass (three units, three synthetic relay-disabled integrations), including wrong-author rejection before SQLite creation and file handoff received/verified by a later synthetic subscriber. All four offline preparation tests pass. No real author key/node, human recipients, public relays, game chat, actual release or public publication used. Normal release signing/handoff automation and real opt-in UI/game verification remain open. Signer input audit replaces unbounded body-file read with a maximum1503-byte read and at most1502 encoded input bytes, permitting a final LF/CRLF around a native1500-byte body. Positive sequence, nonblank120-byte title and1500-byte trimmed body are validated before reading the signing key or reserving a number. New regression rejects a sparse16MiB body before a missing-key read, rejects oversized multibyte text without consuming sequence, then signs/verifies a full1500-byte body with Windows CRLF at the same sequence. All seven CLI regressions pass (four unit, three synthetic relay-disabled integrations) in release-news-final-bounded-signer-tests.log. No real keys, releases, human publication or game chat used. Added local sign-release-announcement.py and release entrypoint announcement-sign: explicit reviewed draft/CLI/key path/expected public key, CI refusal, bounded fixed draft inputs, positive sequence/native byte limits, exact public-key match, immutable body passed as structured argv, native signature verification and exact sequence/title/body comparison before writing packet. Python never reads key contents; native author-only subprocesses do not open nodes. Exclusive mode0600 output refuses overwrite; failures leave an empty marker for operator review and may consume a sequence rather than retrying automatically. Success emits public/hash signed-receipt.json marked published=false while unsigned draft metadata remains unchanged. Rust Debug output parser handles Unicode joiners and literal escaped sequences. Nine workflow tests pass for preparation/integrated sign routing, no publication calls, CI/size refusal without CLI invocation, key mismatch/marker, exact verification/receipt and no overwrite. Actual CLI synthetic-key fixture passes exact Unicode/literal-escape content comparison, packet/receipt hashes, mode0600 and no overwrite; no network/node/publication in that fixture. Real author setup and normal release-cut automatic signing/publication remain absent. Local signing helper and release entrypoint now expose optional --previous-seq for an explicit older-key migration. Negative/equal/non-integer assertions are rejected before invoking the CLI or creating a packet; valid zero is forwarded explicitly, never inferred. Ten workflow tests pass. Actual native CLI synthetic imported-key fixture first signs a prior announcement, moves the synthetic key to a history-free path without deleting its old reservation history, refuses missing-history signing without an assertion, migrates at sequence2 with declared previous1 while preserving the public identity, and rejects an attempted override of the newly established history. Receipt remains unpublished; no node/network/publication or real key use. This is local migration behavior, not a global audit of independent key copies. Normal testing/stable release commands now optionally accept paired announcement-seq/announcement-out flags. Preflight rejects invalid sequences, existing/symlink outputs and directories inside the repository before any release auth/git/network work. Dry runs describe preparation without writing it. Real source flow first completes existing release verification, then prepares unsigned news for the exact tag; failed release verification skips the draft, and post-verification draft failure reports that the release is already verified and should not be cut again. Thirteen workflow tests pass, including verified-release ordering, failure paths and option admission; help parsing exposes the flags. These are source/mocked orchestration tests, not actual release/publication evidence. No real release, signing key or author-node publication executed.",
+      "remaining": [
+        "Sequence-history recovery/rollback integrity and Windows durability; ordinary local reservation/sign/verify paths host-tested",
+        "Normal release-cut automatic signing/publication orchestration; dedicated offline draft/local sign with explicit older-key migration/verified native file handoff implemented",
+        "Configure author public identity and reachable author node without exposing the private key",
+        "Explicitly authorized publication and actual opt-in announcement/support UI game verification"
+      ]
+    }
+  ]
+}

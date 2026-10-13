@@ -8,9 +8,17 @@
 //! * nothing here allocates memory the caller has to free. Text is copied into
 //!   caller buffers; event payloads live in a per-node arena that is cleared at
 //!   the top of `lt_poll`.
-//! * every function except `lt_node_open` / `lt_node_close` is non-blocking.
+//! * networking runs asynchronously. Optional `lt_nostr_*` preparation touches
+//!   SQLite/cryptography and must run on a background thread.
 
 #![allow(non_camel_case_types)]
+mod sealed;
+pub use sealed::{lt_channel_create_sealed, lt_channel_reseal, lt_room_is_sealed, lt_blob_add_sealed_bytes};
+
+#[cfg(feature = "nostr")]
+mod nostr;
+#[cfg(feature = "nostr")]
+pub use nostr::{lt_nostr_identity, lt_nostr_send_invite, lt_nostr_check_inbox};
 
 use std::{
     ffi::{c_char, c_void, CStr},
@@ -94,6 +102,14 @@ pub const LT_EV_SUPPORT_REPLY: u32 = 30;
 pub const LT_EV_SUPPORT_DELIVERED: u32 = 31;
 pub const LT_EV_SUPPORT_FAILED: u32 = 32;
 pub const LT_EV_SELFTEST: u32 = 33;
+pub const LT_EV_CHANNEL_RECORD: u32 = 34;
+pub const LT_EV_CHANNEL_HISTORY: u32 = 35;
+pub const LT_EV_CHANNEL_HISTORY_CLEARED: u32 = 36;
+pub const LT_EV_NOSTR_DONE: u32 = 37;
+pub const LT_EV_NOSTR_FAILED: u32 = 38;
+pub const LT_EV_NOSTR_INVITE: u32 = 39;
+pub const LT_EV_NOSTR_DEVICES: u32 = 40;
+pub const LT_EV_BLOB_WITHDRAWN: u32 = 41;
 
 // ------------------------------------------------------------ presence status
 
@@ -474,6 +490,17 @@ pub unsafe extern "C" fn lt_poll(
                     slot.peer = peer;
                     Some(data)
                 }
+                Event::ChannelRecord { room, peer, encoded, historical } => {
+                    slot.kind = if historical { LT_EV_CHANNEL_HISTORY } else { LT_EV_CHANNEL_RECORD };
+                    slot.handle = room;
+                    slot.peer = peer;
+                    Some(encoded)
+                }
+                Event::ChannelHistoryCleared { room } => {
+                    slot.kind = LT_EV_CHANNEL_HISTORY_CLEARED;
+                    slot.handle = room;
+                    None
+                }
                 Event::Direct { conn, peer, data } => {
                     slot.kind = LT_EV_DIRECT;
                     slot.handle = conn;
@@ -509,6 +536,11 @@ pub unsafe extern "C" fn lt_poll(
                         json_escape(&meta.name)
                     );
                     Some(json.into_bytes())
+                }
+                Event::BlobWithdrawn { blob } => {
+                    slot.kind = LT_EV_BLOB_WITHDRAWN;
+                    slot.handle = blob;
+                    None
                 }
                 Event::BlobProgress { blob, done, total } => {
                     slot.kind = LT_EV_BLOB_PROGRESS;
@@ -590,21 +622,21 @@ pub unsafe extern "C" fn lt_poll(
                     slot.peer = peer;
                     Some(ticket.into_bytes())
                 }
-                // nostr is not in the C ABI yet; if a build enables it, its
-                // results surface as log lines rather than new event kinds.
                 Event::NostrDone { handle, ok, detail } => {
-                    slot.kind = LT_EV_LOG;
+                    slot.kind = if ok { LT_EV_NOSTR_DONE } else { LT_EV_NOSTR_FAILED };
                     slot.handle = handle;
-                    Some(format!("nostr: {} {detail}", if ok { "ok" } else { "failed" }).into_bytes())
+                    Some(detail.into_bytes())
                 }
-                Event::NostrInvite { ticket, .. } => {
-                    slot.kind = LT_EV_LOG;
-                    Some(format!("nostr invite: {ticket}").into_bytes())
+                Event::NostrInvite { from, ticket } => {
+                    slot.kind = LT_EV_NOSTR_INVITE;
+                    slot.peer = from;
+                    Some(ticket.into_bytes())
                 }
-                Event::NostrDevices { handle, devices, .. } => {
-                    slot.kind = LT_EV_LOG;
+                Event::NostrDevices { handle, user, devices } => {
+                    slot.kind = LT_EV_NOSTR_DEVICES;
                     slot.handle = handle;
-                    Some(format!("nostr: {} devices", devices.len()).into_bytes())
+                    slot.peer = user;
+                    Some(devices.into_iter().flatten().collect())
                 }
                 Event::RateLimited { peer, what } => {
                     slot.kind = LT_EV_RATE_LIMITED;
@@ -818,6 +850,51 @@ pub unsafe extern "C" fn lt_room_send(
         node.node
             .room_send(room, slice)
             .map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `node` must be a live node pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lt_channel_record_events_enable(node: *mut lt_node, enabled: u32) -> lt_status {
+    guard(|| {
+        if enabled > 1 { return LT_E_ARG; }
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        node.node.channel_record_events_enable(enabled != 0).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `node` must be a live node pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lt_room_history_enable(node: *mut lt_node, room: u64, enabled: u32) -> lt_status {
+    guard(|| {
+        if enabled > 1 { return LT_E_ARG; }
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        node.node.room_history_enable(room, enabled != 0).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `node` must be a live node pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lt_room_history_clear(node: *mut lt_node, room: u64) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        node.node.room_history_clear(room).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `data` must point to `len` readable bytes; `node` must be live or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn lt_room_send_with_history(node: *mut lt_node, room: u64, data: *const u8, len: u32) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        if len as usize > lantern_core::MAX_TEXT { return LT_E_TOO_LARGE; }
+        let Some(bytes) = slice_of(data, len) else { return LT_E_ARG; };
+        let Ok(text) = std::str::from_utf8(bytes) else { return LT_E_ARG; };
+        node.node.room_send_with_history(room, text).map_or_else(|e| status_of(&e), |_| LT_OK)
     })
 }
 
@@ -1095,6 +1172,27 @@ pub unsafe extern "C" fn lt_blob_hash_text(
     })
 }
 
+/// # Safety
+/// `out_path` must be NUL-terminated UTF-8. See the bounded file contract in the header.
+#[no_mangle]
+pub unsafe extern "C" fn lt_blob_fetch_bounded(node: *mut lt_node, blob: u64, out_path: *const c_char) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        let path = match req_str(out_path) { Ok(p) => p, Err(e) => return e };
+        node.node.blob_fetch_bounded(blob, path).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `node` must be live. Cancellation is a request; observe the terminal event.
+#[no_mangle]
+pub unsafe extern "C" fn lt_blob_cancel_bounded(node: *mut lt_node, blob: u64) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        node.node.blob_cancel_bounded(blob).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
 // ------------------------------------------------------------------ bookmarks
 
 /// # Safety
@@ -1220,6 +1318,17 @@ pub unsafe extern "C" fn lt_presence_status_set(
         node.node
             .set_presence(status, note)
             .map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `tags_json` must be NUL-terminated UTF-8 containing a JSON string array.
+#[no_mangle]
+pub unsafe extern "C" fn lt_activity_tags_set(node: *mut lt_node, tags_json: *const c_char) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        let text = match req_str(tags_json) { Ok(s) => s, Err(e) => return e };
+        node.node.set_activity_tags_json(text).map_or_else(|e| status_of(&e), |_| LT_OK)
     })
 }
 
@@ -1437,6 +1546,28 @@ pub unsafe extern "C" fn lt_channel_invite(node: *mut lt_node, peer: *const u8, 
 }
 
 // --------------------------------------------------------------------- safety
+
+/// # Safety
+/// `peer` must point to 32 bytes; node must be live.
+#[no_mangle]
+pub unsafe extern "C" fn lt_friend_file_offer(node: *mut lt_node, peer: *const u8, blob: u64) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        let Some(peer) = peer_of(peer) else { return LT_E_ARG; };
+        node.node.friend_file_offer(&peer, blob).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
+
+/// # Safety
+/// `peer` must point to 32 bytes; node must be live.
+#[no_mangle]
+pub unsafe extern "C" fn lt_friend_file_withdraw(node: *mut lt_node, peer: *const u8, blob: u64) -> lt_status {
+    guard(|| {
+        let node = match node_ref(node) { Ok(n) => n, Err(e) => return e };
+        let Some(peer) = peer_of(peer) else { return LT_E_ARG; };
+        node.node.friend_file_withdraw(&peer, blob).map_or_else(|e| status_of(&e), |_| LT_OK)
+    })
+}
 
 /// # Safety
 /// `peer` must point to 32 bytes.
@@ -1805,7 +1936,8 @@ mod tests {
     fn the_header_matches_the_exports_and_constants() {
         use std::collections::BTreeMap;
         let header = include_str!("../../../include/lantern.h");
-        let source = include_str!("lib.rs");
+        // Optional entry points live in their own module but share this header.
+        let source = format!("{}\n{}", include_str!("lib.rs"), include_str!("nostr.rs"));
 
         let declared: std::collections::BTreeSet<&str> = header
             .lines()

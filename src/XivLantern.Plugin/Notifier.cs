@@ -25,6 +25,7 @@ public sealed class Notifier : IDisposable
     private DateTime nextUpdate;
     private string lastText = "";
     private bool dtrFailed;
+    private bool? lastHideRoster;
 
     public Notifier(INotificationManager notifications, IDtrBar dtrBar, IFramework framework, IPluginLog log, Configuration config, LanternService service, Action toggleWindow)
     {
@@ -36,6 +37,7 @@ public sealed class Notifier : IDisposable
         this.service = service;
         this.toggleWindow = toggleWindow;
         service.Arrived += OnArrived;
+        service.PullCompleted += OnPullCompleted;
         framework.Update += OnUpdate;
     }
 
@@ -59,13 +61,30 @@ public sealed class Notifier : IDisposable
         }
     }
 
+    private void OnPullCompleted(string channel)
+    {
+        if (!config.PullTimersEnabled) return;
+        if (config.PullTimerChime) PullChime.Play();
+        if (!config.Toasts) return;
+        try
+        {
+            notifications.AddNotification(new Notification
+            {
+                Title = "Lantern pull", Content = "Go · #" + ChatText.Preview(channel, 60),
+                Type = NotificationType.Success, InitialDuration = TimeSpan.FromSeconds(3),
+            });
+        }
+        catch { /* A notification failure must not interrupt network polling. */ }
+    }
+
     private void OnUpdate(IFramework _)
     {
         if (dtrFailed)
             return;
         var now = DateTime.UtcNow;
-        if (now < nextUpdate)
+        if (now < nextUpdate && lastHideRoster == config.HideDtrRoster)
             return;
+        lastHideRoster = config.HideDtrRoster;
         nextUpdate = now + Interval;
         try
         {
@@ -93,16 +112,16 @@ public sealed class Notifier : IDisposable
             }
 
             int unread = service.Book.TotalUnread;
-            int online = service.Friends.Count(f => f.Online);
+            var roster = DtrRoster.Build(service.Friends, unread, config.HideDtrRoster);
             var text = service.State switch
             {
-                ServiceState.On => unread > 0 ? $"Lantern ✉{unread}" : $"Lantern {online}",
+                ServiceState.On => roster.Text,
                 ServiceState.Starting => "Lantern …",
                 ServiceState.Failed => "Lantern !",
                 _ => "Lantern ○",
             };
             var tip = service.State == ServiceState.On
-                ? $"Lantern: {online} friend(s) online, {unread} unread. Click to open."
+                ? roster.Tooltip
                 : $"Lantern is {service.State.ToString().ToLowerInvariant()}. Click to open.";
             if (text + tip == lastText)
                 return;
@@ -137,6 +156,7 @@ public sealed class Notifier : IDisposable
     public void Dispose()
     {
         service.Arrived -= OnArrived;
+        service.PullCompleted -= OnPullCompleted;
         framework.Update -= OnUpdate;
         Remove();
     }

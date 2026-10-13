@@ -5,14 +5,20 @@
 //! short. The identity row is the whole reason this file exists: a player's
 //! node id has to survive a restart or every bookmark anyone made of them dies.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use iroh::SecretKey;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::{ticket::Scope, Error, Result};
+use crate::{channel_history::{self, HistoryRecord}, ticket::Scope, Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
+pub const PEER_HINT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+pub const MAX_PEER_HINT_BYTES: usize = 4096;
+pub const MAX_ROOM_PEER_HINTS: usize = 32;
+pub const MAX_PEER_HINTS: usize = 256;
+pub const HISTORY_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+pub const MAX_STORED_HISTORY: usize = 8192;
 
 pub struct Store {
     db: Connection,
@@ -194,7 +200,140 @@ impl Store {
                 )
                 .map_err(store_err)?;
         }
+        if version < 4 {
+            self.db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS channel_history (
+                    room BLOB NOT NULL CHECK(length(room) = 32),
+                    signature BLOB NOT NULL CHECK(length(signature) = 64),
+                    encoded BLOB NOT NULL,
+                    received_at INTEGER NOT NULL CHECK(received_at >= 0),
+                    PRIMARY KEY (room, signature)
+                 );
+                 CREATE INDEX IF NOT EXISTS channel_history_received
+                    ON channel_history (received_at, signature);
+                 CREATE INDEX IF NOT EXISTS channel_history_room_received
+                    ON channel_history (room, received_at, signature);
+                 PRAGMA user_version = 4;"
+            ).map_err(store_err)?;
+        }
+        if version < 5 {
+            self.db.execute_batch(
+                "CREATE TABLE IF NOT EXISTS channel_peers (
+                    room BLOB NOT NULL CHECK(length(room) = 32),
+                    peer BLOB NOT NULL CHECK(length(peer) = 32),
+                    offer BLOB NOT NULL CHECK(length(offer) BETWEEN 1 AND 4096),
+                    received_at INTEGER NOT NULL CHECK(received_at >= 0),
+                    PRIMARY KEY(room, peer)
+                 );
+                 CREATE INDEX IF NOT EXISTS channel_peers_received
+                    ON channel_peers(received_at, room, peer);
+                 PRAGMA user_version = 5;"
+            ).map_err(store_err)?;
+        }
         Ok(())
+    }
+
+    /// Opaque original signed offers. The node admits these only after live
+    /// validation/authenticated fetch and reverifies them before routing.
+    pub(crate) fn channel_peer_hint_put(&mut self, room: &[u8; 32], peer: &[u8; 32], offer: &[u8], now: i64) -> Result<()> {
+        if offer.is_empty() || offer.len() > MAX_PEER_HINT_BYTES || now < 0 {
+            return Err(Error::Arg("invalid channel provider hint"));
+        }
+        let tx = self.db.transaction().map_err(store_err)?;
+        tx.execute("INSERT INTO channel_peers(room,peer,offer,received_at) VALUES(?1,?2,?3,?4)
+                    ON CONFLICT(room,peer) DO UPDATE SET offer=excluded.offer, received_at=excluded.received_at",
+                   params![room.as_slice(), peer.as_slice(), offer, now]).map_err(store_err)?;
+        tx.execute("DELETE FROM channel_peers WHERE received_at < ?1 OR received_at > ?2",
+                   params![now.saturating_sub(PEER_HINT_RETENTION_MS), now]).map_err(store_err)?;
+        tx.execute("DELETE FROM channel_peers WHERE room=?1 AND rowid NOT IN
+                    (SELECT rowid FROM channel_peers WHERE room=?1 ORDER BY received_at DESC,peer DESC LIMIT ?2)",
+                   params![room.as_slice(), MAX_ROOM_PEER_HINTS as i64]).map_err(store_err)?;
+        tx.execute("DELETE FROM channel_peers WHERE rowid IN
+                    (SELECT rowid FROM channel_peers ORDER BY received_at DESC,room DESC,peer DESC LIMIT -1 OFFSET ?1)",
+                   params![MAX_PEER_HINTS as i64]).map_err(store_err)?;
+        tx.commit().map_err(store_err)
+    }
+
+    pub(crate) fn channel_peer_hints(&self, room: &[u8; 32], now: i64) -> Result<Vec<([u8; 32], Vec<u8>)>> {
+        let mut stmt = self.db.prepare("SELECT peer,offer FROM channel_peers WHERE room=?1
+            AND received_at BETWEEN ?2 AND ?3 AND length(peer)=32 AND length(offer) BETWEEN 1 AND 4096
+            ORDER BY received_at DESC,peer DESC LIMIT ?4").map_err(store_err)?;
+        let rows = stmt.query_map(params![room.as_slice(), now.saturating_sub(PEER_HINT_RETENTION_MS), now, MAX_ROOM_PEER_HINTS as i64],
+            |row| Ok((blob32(row.get(0)?)?, row.get(1)?))).map_err(store_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(store_err)
+    }
+
+    pub(crate) fn channel_peer_hint_prune(&mut self, now: i64) -> Result<usize> {
+        if now < 0 { return Err(Error::Arg("invalid provider hint receipt time")); }
+        self.db.execute("DELETE FROM channel_peers WHERE received_at < ?1 OR received_at > ?2",
+            params![now.saturating_sub(PEER_HINT_RETENTION_MS), now]).map_err(store_err)
+    }
+
+    /// Local receipt time governs retention; an author's future timestamp
+    /// cannot pin a record. Duplicate signatures do not refresh receipt time.
+    pub fn channel_history_insert(&mut self, room: &[u8; 32], encoded: &[u8], received_at: i64) -> Result<bool> {
+        if received_at < 0 { return Err(Error::Arg("invalid local receipt time")); }
+        let record = channel_history::verify(room, encoded)
+            .ok_or(Error::Arg("invalid signed channel history record"))?;
+        let tx = self.db.transaction().map_err(store_err)?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO channel_history (room, signature, encoded, received_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![room.as_slice(), record.signature().as_slice(), record.encoded(), received_at]
+        ).map_err(store_err)? > 0;
+        tx.execute("DELETE FROM channel_history WHERE received_at < ?1",
+            params![received_at.saturating_sub(HISTORY_RETENTION_MS)]).map_err(store_err)?;
+        tx.execute(
+            "DELETE FROM channel_history WHERE room = ?1 AND rowid NOT IN (
+                SELECT rowid FROM channel_history WHERE room = ?1
+                ORDER BY received_at DESC, signature DESC LIMIT ?2)",
+            params![room.as_slice(), channel_history::MAX_RECORDS as i64]
+        ).map_err(store_err)?;
+        tx.execute(
+            "DELETE FROM channel_history WHERE rowid IN (
+                SELECT rowid FROM channel_history ORDER BY received_at DESC, signature DESC
+                LIMIT -1 OFFSET ?1)", params![MAX_STORED_HISTORY as i64]
+        ).map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(inserted)
+    }
+
+    /// Read on the worker, not the game frame thread: reverify stored bytes so
+    /// edited/corrupted SQLite rows cannot become authenticated UI lines.
+    pub fn channel_history_read(&self, room: &[u8; 32], now: i64) -> Result<Vec<HistoryRecord>> {
+        if now < 0 { return Err(Error::Arg("invalid local clock")); }
+        let mut stmt = self.db.prepare(
+            "SELECT encoded FROM channel_history WHERE room = ?1 AND received_at >= ?2
+             AND length(encoded) BETWEEN ?4 AND ?5
+             ORDER BY received_at DESC, signature DESC LIMIT ?3"
+        ).map_err(store_err)?;
+        let rows = stmt.query_map(params![room.as_slice(), now.saturating_sub(HISTORY_RETENTION_MS), channel_history::MAX_RECORDS as i64,
+            (channel_history::MAX_RECORD_BYTES - crate::MAX_TEXT) as i64, channel_history::MAX_RECORD_BYTES as i64],
+            |row| row.get::<_, Vec<u8>>(0)).map_err(store_err)?;
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            if let Some(record) = channel_history::verify(room, &row.map_err(store_err)?) {
+                if seen.insert(*record.signature()) { records.push(record); }
+            }
+        }
+        records.sort_by(|a, b| a.sent_at().cmp(&b.sent_at()).then(a.author().as_bytes().cmp(b.author().as_bytes()))
+            .then(a.id().cmp(b.id())).then(a.signature().cmp(b.signature())));
+        Ok(records)
+    }
+
+    /// Local deletion cannot remove the copies held by other room members.
+    pub fn channel_history_clear(&mut self, room: &[u8; 32]) -> Result<()> {
+        self.db.execute("DELETE FROM channel_history WHERE room = ?1", params![room.as_slice()]).map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Periodic worker maintenance also expires idle rooms without requiring
+    /// a new message. A stopped plugin cannot perform background deletion.
+    pub fn channel_history_prune(&mut self, now: i64) -> Result<usize> {
+        if now < 0 { return Err(Error::Arg("invalid local clock")); }
+        self.db.execute("DELETE FROM channel_history WHERE received_at < ?1",
+            params![now.saturating_sub(HISTORY_RETENTION_MS)]).map_err(store_err)
     }
 
     // ------------------------------------------------------------- blocked
@@ -910,4 +1049,180 @@ mod tests {
         let v: i64 = s.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v, SCHEMA_VERSION);
     }
+
+    #[test]
+    fn channel_history_persists_and_validates_before_insertion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        let key = SecretKey::generate();
+        let raw = channel_history::sign(&key, [1; 32], 42, "maps").unwrap();
+        {
+            let mut s = Store::open(Some(&path)).unwrap();
+            assert!(s.channel_history_insert(&[1; 32], &raw, 100).unwrap());
+            assert!(!s.channel_history_insert(&[1; 32], &raw, 200).unwrap());
+            assert!(s.channel_history_insert(&[2; 32], &raw, 100).is_err());
+            let mut tampered = raw.clone(); tampered[98] ^= 1;
+            assert!(s.channel_history_insert(&[1; 32], &tampered, 100).is_err());
+            assert!(s.channel_history_insert(&[1; 32], &raw, -1).is_err());
+        }
+        let mut s = Store::open(Some(&path)).unwrap();
+        let records = s.channel_history_read(&[1; 32], 200).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].author(), key.public());
+        assert_eq!(records[0].encoded(), raw);
+        assert!(s.channel_history_read(&[2; 32], 200).unwrap().is_empty());
+        s.channel_history_clear(&[2; 32]).unwrap();
+        assert_eq!(s.channel_history_read(&[1; 32], 200).unwrap().len(), 1);
+        s.channel_history_clear(&[1; 32]).unwrap();
+        assert!(s.channel_history_read(&[1; 32], 200).unwrap().is_empty());
+    }
+
+    #[test]
+    fn channel_history_retention_uses_receipt_and_replay_does_not_refresh_it() {
+        let mut s = Store::open(None).unwrap();
+        let key = SecretKey::generate();
+        let raw = channel_history::sign(&key, [1; 32], i64::MAX, "future clock").unwrap();
+        s.channel_history_insert(&[1; 32], &raw, 0).unwrap();
+        assert!(!s.channel_history_insert(&[1; 32], &raw, HISTORY_RETENTION_MS - 1).unwrap());
+        assert!(s.channel_history_read(&[1; 32], HISTORY_RETENTION_MS + 1).unwrap().is_empty());
+        let new = channel_history::sign(&key, [1; 32], 1, "new receipt").unwrap();
+        s.channel_history_insert(&[1; 32], &new, HISTORY_RETENTION_MS + 2).unwrap();
+        let records = s.channel_history_read(&[1; 32], HISTORY_RETENTION_MS + 2).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].text(), "new receipt");
+        let count: i64 = s.db.query_row("SELECT count(*) FROM channel_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn channel_history_per_room_limit_keeps_recent_receipts_and_other_rooms() {
+        let mut s = Store::open(None).unwrap();
+        let key = SecretKey::generate();
+        let other = channel_history::sign(&key, [2; 32], 1, "other room").unwrap();
+        s.channel_history_insert(&[2; 32], &other, 0).unwrap();
+        for i in 0..=channel_history::MAX_RECORDS {
+            let raw = channel_history::sign(&key, [1; 32], 10000 - i as i64, &i.to_string()).unwrap();
+            s.channel_history_insert(&[1; 32], &raw, i as i64 + 1).unwrap();
+        }
+        let records = s.channel_history_read(&[1; 32], 1000).unwrap();
+        assert_eq!(records.len(), channel_history::MAX_RECORDS);
+        assert!(!records.iter().any(|r| r.text() == "0"));
+        assert!(records.windows(2).all(|r| r[0].sent_at() <= r[1].sent_at()));
+        assert_eq!(s.channel_history_read(&[2; 32], 1000).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn channel_history_global_limit_also_prunes_injected_bad_rows() {
+        let mut s = Store::open(None).unwrap();
+        // Simulate a database with excessive/corrupt rows. The global policy
+        // must bound disk rows even when none of these signatures verifies.
+        let tx = s.db.transaction().unwrap();
+        {
+            let mut stmt = tx.prepare("INSERT INTO channel_history VALUES (?1, ?2, ?3, 0)").unwrap();
+            for i in 0..MAX_STORED_HISTORY + 50 {
+                let mut room = [0u8; 32]; room[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                stmt.execute(params![room.as_slice(), [0u8; 64].as_slice(), [0u8].as_slice()]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let key = SecretKey::generate();
+        let raw = channel_history::sign(&key, [255; 32], 42, "valid").unwrap();
+        s.channel_history_insert(&[255; 32], &raw, 1).unwrap();
+        let count: i64 = s.db.query_row("SELECT count(*) FROM channel_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, MAX_STORED_HISTORY as i64);
+        assert_eq!(s.channel_history_read(&[255; 32], 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn channel_history_reads_drop_tampered_or_oversized_database_bytes() {
+        let mut s = Store::open(None).unwrap();
+        let key = SecretKey::generate();
+        let mut raw = channel_history::sign(&key, [1; 32], 42, "valid").unwrap();
+        s.channel_history_insert(&[1; 32], &raw, 1).unwrap();
+        raw[98] ^= 1;
+        s.db.execute("UPDATE channel_history SET encoded = ?1", params![raw]).unwrap();
+        assert!(s.channel_history_read(&[1; 32], 1).unwrap().is_empty());
+        s.db.execute("UPDATE channel_history SET encoded = ?1", params![vec![0u8; channel_history::MAX_RECORD_BYTES + 1]]).unwrap();
+        assert!(s.channel_history_read(&[1; 32], 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn channel_history_schema_three_migration_preserves_identity_and_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migration.sqlite");
+        let public;
+        {
+            let mut s = Store::open(Some(&path)).unwrap();
+            public = s.identity().unwrap().public();
+            s.profile_set("name", "stable").unwrap();
+            s.db.execute_batch("DROP TABLE channel_history; PRAGMA user_version = 3;").unwrap();
+        }
+        let mut s = Store::open(Some(&path)).unwrap();
+        assert_eq!(s.identity().unwrap().public(), public);
+        assert_eq!(s.profile_get("name").unwrap().as_deref(), Some("stable"));
+        assert!(s.channel_history_read(&[1; 32], 0).unwrap().is_empty());
+        let version: i64 = s.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn channel_history_maintenance_expires_idle_rooms_without_new_messages() {
+        let mut s = Store::open(None).unwrap();
+        let key = SecretKey::generate();
+        for room in [[1; 32], [2; 32]] {
+            let raw = channel_history::sign(&key, room, i64::MAX, "idle").unwrap();
+            s.channel_history_insert(&room, &raw, 0).unwrap();
+        }
+        assert!(s.channel_history_prune(-1).is_err());
+        assert_eq!(s.channel_history_prune(HISTORY_RETENTION_MS).unwrap(), 0);
+        assert_eq!(s.channel_history_prune(HISTORY_RETENTION_MS + 1).unwrap(), 2);
+        assert_eq!(s.channel_history_prune(HISTORY_RETENTION_MS + 1).unwrap(), 0);
+        let count: i64 = s.db.query_row("SELECT count(*) FROM channel_history", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+    #[test]
+    fn provider_hint_storage_is_bounded_scoped_and_expires_locally() {
+        let mut s = Store::open(None).unwrap();
+        assert!(s.channel_peer_hint_put(&[1; 32], &[1; 32], b"", 0).is_err());
+        assert!(s.channel_peer_hint_put(&[1; 32], &[1; 32], &vec![0; MAX_PEER_HINT_BYTES + 1], 0).is_err());
+        for room in 0..10u8 {
+            for peer in 0..40u8 {
+                s.channel_peer_hint_put(&[room; 32], &[peer; 32], &[room, peer], (room as i64) * 40 + peer as i64).unwrap();
+            }
+            assert_eq!(s.channel_peer_hints(&[room; 32], 1000).unwrap().len(), MAX_ROOM_PEER_HINTS);
+        }
+        let count: usize = s.db.query_row("SELECT count(*) FROM channel_peers", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, MAX_PEER_HINTS);
+        let newest = s.channel_peer_hints(&[9; 32], 1000).unwrap();
+        assert_eq!(newest[0], ([39; 32], vec![9, 39]));
+        assert!(s.channel_peer_hints(&[9; 32], PEER_HINT_RETENTION_MS + 1000).unwrap().is_empty());
+        assert!(s.channel_peer_hint_prune(-1).is_err());
+        assert!(s.channel_peer_hints(&[9; 32], 0).unwrap().is_empty());
+        s.channel_peer_hint_put(&[9; 32], &[39; 32], b"changed route", 1001).unwrap();
+        assert_eq!(s.channel_peer_hints(&[9; 32], 1001).unwrap()[0].1, b"changed route");
+        let count: usize = s.db.query_row("SELECT count(*) FROM channel_peers", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, MAX_PEER_HINTS);
+        assert_eq!(s.channel_peer_hint_prune(PEER_HINT_RETENTION_MS + 1002).unwrap(), MAX_PEER_HINTS);
+        assert_eq!(s.channel_peer_hint_prune(PEER_HINT_RETENTION_MS + 1002).unwrap(), 0);
+    }
+
+    #[test]
+    fn schema_four_to_five_preserves_identity_and_original_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migration.sqlite");
+        let (identity, original) = {
+            let mut s = Store::open(Some(&path)).unwrap();
+            let key = s.identity().unwrap();
+            let raw = channel_history::sign(&key, [1; 32], 1, "existing signed line").unwrap();
+            s.channel_history_insert(&[1; 32], &raw, 1).unwrap();
+            s.db.execute_batch("DROP TABLE channel_peers; PRAGMA user_version=4;").unwrap();
+            (key.public(), raw)
+        };
+        let mut reopened = Store::open(Some(&path)).unwrap();
+        assert_eq!(reopened.identity().unwrap().public(), identity);
+        assert_eq!(reopened.channel_history_read(&[1; 32], 1).unwrap()[0].encoded(), original);
+        reopened.channel_peer_hint_put(&[1; 32], &[2; 32], b"bounded opaque offer", 1).unwrap();
+        assert_eq!(reopened.channel_peer_hints(&[1; 32], 1).unwrap().len(), 1);
+    }
+
 }

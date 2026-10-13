@@ -26,11 +26,27 @@ public sealed class Configuration : IPluginConfiguration
     public string DisplayName { get; set; } = "";
     public uint Presence { get; set; } = 1;
     public string PresenceNote { get; set; } = "";
+    public List<string> ActivityTags { get; set; } = [];
+    public List<StatusPreset> StatusPresets { get; set; } = [];
+    public bool IdleAwayEnabled { get; set; }
+    public int IdleAwayMinutes { get; set; } = 10;
+    public Dictionary<string, string> FriendFolders { get; set; } = [];
+    public Dictionary<string, string> VerifiedFriends { get; set; } = [];
 
     public bool Toasts { get; set; } = true;
     public bool ChannelToasts { get; set; }
     public bool FriendOnlineToasts { get; set; }
     public bool ShowDtr { get; set; } = true;
+    public bool HideDtrRoster { get; set; }
+    public bool PullTimersEnabled { get; set; } = true;
+    public bool PullTimerChime { get; set; } = true;
+    public bool ChannelHistoryEnabled { get; set; } = true;
+    public bool NostrInvitesEnabled { get; set; }
+    public int SharedCacheBudgetMiB { get; set; } = 256;
+    public int DownloadBudgetMiB { get; set; } = 256;
+    public int DownloadRetentionDays { get; set; } // Zero keeps files until manually deleted.
+    public List<string> NostrRelays { get; set; } = [];
+    public List<string> NostrIgnoredInvites { get; set; } = [];
 
     /// <summary>Opt in to the author's announcement channel (and the option to write to the author).</summary>
     public bool JoinAuthorChannel { get; set; }

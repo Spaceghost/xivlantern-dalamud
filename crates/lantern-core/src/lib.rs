@@ -15,6 +15,7 @@
 //! safe to call once per frame.
 
 pub mod author;
+pub mod channel_history;
 pub mod config;
 #[cfg(feature = "nostr")]
 pub mod nostr;
@@ -26,6 +27,8 @@ pub mod ticket;
 pub mod topic;
 
 mod node;
+mod bounded_blob;
+mod sealed_file;
 
 pub use config::{Config, RelayMode};
 pub use event::{BlobMeta, Event, PeerId, Status};
