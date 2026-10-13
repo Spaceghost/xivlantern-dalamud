@@ -1,8 +1,20 @@
 {
   "_comment": "The changelog. tools/changelog.py renders CHANGELOG.md from this file, and release notes and the installer's changelog are written from it. Every user-visible change edits this file in the same commit. Statuses: new/fix (in a release, seen working in game), beta (merged, not yet verified in game), next (still being built, not merged).",
   "project": "XivLantern",
-  "intro": "Every change to XivLantern a player can see, newest first.\n\nXivLantern has not yet been observed running in the game. Host tests cover the network layer, the C ABI and the plugin's logic, and the Windows build of the network layer has passed its selftest under a stock Wine in a container; nothing below about in-game behaviour has been seen working. Treat it as the design, not as a result — the README says the same thing.",
+  "intro": "Every change to XivLantern a player can see, newest first.\n\nXivLantern has not yet been observed running in the game. Host tests cover the network layer, the C ABI and the plugin's logic, and the Windows build of the network layer has passed its selftest under a stock Wine in a container; nothing below about in-game behaviour has been seen working. Treat it as the design, not as a result \u2014 the README says the same thing.",
   "releases": [
+    {
+      "version": "next",
+      "title": "In development",
+      "date": "2026-10-13",
+      "blurb": "Experimental host-tested work; Windows/Wine and in-game acceptance remain pending.",
+      "items": [
+        {
+          "status": "beta",
+          "text": "Experimental communication build: local friend folders and safety-word comparison, status presets, optional automatic away and activity tags, pull countdowns, bounded file transfer, channel history and sealed-channel components. Native, binding and managed tests run without the game. Windows/Wine execution, game UI and end-to-end release acceptance remain unverified; use the testing channel only."
+        }
+      ]
+    },
     {
       "version": "0.1.0",
       "title": "Released 2026-09-23",
@@ -15,7 +27,7 @@
         },
         {
           "status": "beta",
-          "text": "Off until you turn it on. The first screen says who can see what — friends see your node id, your typed name and status, and your IP addresses; n0's relays see your IP address and when you are online; channel members see your node id — and you choose the relays: n0's (default), your own relay URL, or relays off for LAN/direct only, which contacts no third party at all. Nothing from the game is read or sent: not your character's name, world, location or chat. A test fails the build if the plugin ever asks the game who you are."
+          "text": "Off until you turn it on. The first screen says who can see what \u2014 friends see your node id, your typed name and status, and your IP addresses; n0's relays see your IP address and when you are online; channel members see your node id \u2014 and you choose the relays: n0's (default), your own relay URL, or relays off for LAN/direct only, which contacts no third party at all. Nothing from the game is read or sent: not your character's name, world, location or chat. A test fails the build if the plugin ever asks the game who you are."
         },
         {
           "status": "beta",
