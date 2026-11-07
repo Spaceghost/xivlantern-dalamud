@@ -68,7 +68,7 @@ mkdir -p "$STAGE/XivLantern" "$OUT"
       ./runtimes/* | ./XivLantern/*) continue ;;                          # other platforms; DalamudPackager's own staging copy
       ./*.deps.json | ./*.runtimeconfig.json | *.pdb | *.zip) continue ;;
       ./*/*) continue ;;                                               # nothing else from a subfolder
-      ./*.dll | ./*.json) ;;
+      ./*.dll | ./*.json | ./EFF-WORDLIST-NOTICE.txt) ;;
       *) continue ;;
     esac
     mkdir -p "$STAGE/XivLantern/$(dirname "$f")"
@@ -89,7 +89,7 @@ ZIP_ENTRIES="$(unzip -Z1 "$OUT/latest.zip")"
 printf '%s\n' "$ZIP_ENTRIES"
 # What Dalamud opens the zip for. A missing manifest installs a plugin that cannot load.
 # lantern.dll is the native library: without it the plugin loads and cannot connect.
-for want in XivLantern.dll XivLantern.json XivLantern.Core.dll Lantern.Interop.dll lantern.dll ; do
+for want in XivLantern.dll XivLantern.json XivLantern.Core.dll Lantern.Interop.dll lantern.dll EFF-WORDLIST-NOTICE.txt ; do
   printf '%s\n' "$ZIP_ENTRIES" | grep -qxF "$want" || { echo "error: $want is not in the zip" >&2; exit 1; }
 done
 

@@ -66,6 +66,10 @@ pub enum Event {
         peer: PeerId,
         data: Vec<u8>,
     },
+    /// Verified original signed channel record. Historical lines must never
+    /// trigger live timers/notifications. Delivered only for history-enabled rooms.
+    ChannelRecord { room: RoomHandle, peer: PeerId, encoded: Vec<u8>, historical: bool },
+    ChannelHistoryCleared { room: RoomHandle },
     /// An application message over a direct connection.
     Direct {
         conn: ConnHandle,
@@ -82,6 +86,8 @@ pub enum Event {
         blob: BlobHandle,
         meta: BlobMeta,
     },
+    /// Offer withdrawn or its channel left. Does not delete already saved local files.
+    BlobWithdrawn { blob: BlobHandle },
     BlobProgress {
         blob: BlobHandle,
         done: u64,

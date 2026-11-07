@@ -138,3 +138,49 @@ fn nostr_jobs_without_relays_are_refused() {
     }
     assert!(n.nostr_fetch_devices(&["ws://127.0.0.1:1".into()], "not-a-key").is_err());
 }
+
+#[test]
+fn fetched_event_collection_refuses_a_relay_batch_over_the_local_limit() {
+    use lantern_core::nostr::{Relays, MAX_INBOX_EVENTS};
+    use nostr_sdk::prelude::{EventBuilder, Filter, FinalizeEvent, Keys, Kind};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let relay = MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        assert!(url.starts_with("ws://127.0.0.1:") || url.starts_with("ws://localhost:"));
+        let conn = Relays::connect(&[url], std::time::Duration::from_secs(10)).await.unwrap();
+        let author = Keys::generate();
+        for i in 0..=MAX_INBOX_EVENTS {
+            let event = EventBuilder::new(Kind::TextNote, format!("synthetic bounded fetch {i}"))
+                .finalize(&author).unwrap();
+            relay.add_event(event).await.unwrap();
+        }
+        // No server filter limit: the caller's SDK buffer cap must still apply.
+        let result = conn.fetch(Filter::new().kind(Kind::TextNote), std::time::Duration::from_secs(10)).await;
+        conn.shutdown().await;
+        assert!(result.is_err(), "129 unique events must not be returned to the caller");
+    });
+}
+
+#[test]
+fn relay_events_over_size_or_tag_limits_do_not_reach_the_fetch_result() {
+    use lantern_core::nostr::{Relays, MAX_RELAY_EVENT_BYTES};
+    use nostr_sdk::prelude::{EventBuilder, Filter, FinalizeEvent, Keys, Kind, Tag};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let relay = MockRelay::run().await.unwrap();
+        let url = relay.url().await.to_string();
+        assert!(url.starts_with("ws://127.0.0.1:") || url.starts_with("ws://localhost:"));
+        let author = Keys::generate();
+        let oversized = EventBuilder::new(Kind::TextNote, "x".repeat(MAX_RELAY_EVENT_BYTES as usize + 10))
+            .finalize(&author).unwrap();
+        relay.add_event(oversized).await.unwrap();
+        let mut tagged = EventBuilder::new(Kind::TextNote, "synthetic excessive tags");
+        for i in 0..65 { tagged = tagged.tag(Tag::custom("t", [i.to_string()])); }
+        relay.add_event(tagged.finalize(&author).unwrap()).await.unwrap();
+        let conn = Relays::connect(&[url], std::time::Duration::from_secs(10)).await.unwrap();
+        let found = conn.fetch(Filter::new().kind(Kind::TextNote), std::time::Duration::from_secs(10)).await;
+        conn.shutdown().await;
+        assert!(found.unwrap().is_empty(), "oversized and excessive-tag events must be rejected");
+    });
+}

@@ -1,0 +1,12 @@
+EFF Long Wordlist, created by Joseph Bonneau for the Electronic Frontier Foundation.
+Source: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
+Background and attribution: https://www.eff.org/dice
+License: Creative Commons Attribution 4.0 International (CC BY 4.0).
+License text: https://creativecommons.org/licenses/by/4.0/legalcode
+EFF copyright policy: https://www.eff.org/copyright
+
+The original wordlist file is included unchanged.
+SHA-256: addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e
+XivLantern maps a versioned hash of both node identities to four entries in this
+list for a comparison code. These codes are not passwords. EFF does not endorse
+this application or this comparison protocol.

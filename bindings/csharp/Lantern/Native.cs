@@ -75,6 +75,10 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, ulong, int> RoomLeave;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, nuint, nuint*, int> RoomTicket;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int> RoomSend;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int> RoomSendWithHistory;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, uint, int> RoomHistoryEnable;
+    public static delegate* unmanaged[Cdecl]<nint, uint, int> ChannelRecordEventsEnable;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, int> RoomHistoryClear;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int> PresenceSet;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, uint*, int> RoomPeers;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> Connect;
@@ -85,12 +89,15 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, ulong, ulong, int> BlobOffer;
     public static delegate* unmanaged[Cdecl]<nint, ulong, ulong, int> BlobUnoffer;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, int> BlobFetch;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, int> BlobFetchBounded;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, int> BlobCancelBounded;
     public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, nuint, nuint*, int> BlobHashText;
     public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, byte*, int> BookmarkPut;
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> BookmarkForget;
     public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> BookmarkList;
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> ProfileSetName;
     public static delegate* unmanaged[Cdecl]<nint, uint, byte*, int> PresenceStatusSet;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, int> ActivityTagsSet;
     public static delegate* unmanaged[Cdecl]<nint, uint, byte*, nuint, nuint*, int> InviteCreate;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> InviteAccept;
     public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> FriendList;
@@ -98,7 +105,13 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> FriendRemove;
     public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int> FriendHistory;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> ChannelCreate;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int> ChannelCreateSealed;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, ulong*, int> ChannelReseal;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, uint*, int> RoomIsSealed;
+    public static delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, byte*, ulong*, int> BlobAddSealedBytes;
     public static delegate* unmanaged[Cdecl]<nint, byte*, ulong, int> ChannelInvite;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong, int> FriendFileOffer;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, ulong, int> FriendFileWithdraw;
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> Block;
     public static delegate* unmanaged[Cdecl]<nint, byte*, int> Unblock;
     public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> BlockedList;
@@ -108,6 +121,9 @@ internal static unsafe class Native
     public static delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int> AuthorJoin;
     public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int> Announcements;
     public static delegate* unmanaged[Cdecl]<nint, ulong*, int> SelfTest;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int> NostrIdentity;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, uint, ulong*, int> NostrSendInvite;
+    public static delegate* unmanaged[Cdecl]<nint, byte*, uint, ulong*, int> NostrCheckInbox;
 
     /// <summary>
     /// The file name to look for in the plugin folder. Dalamud loads the managed
@@ -150,6 +166,14 @@ internal static unsafe class Native
             RoomLeave = (delegate* unmanaged[Cdecl]<nint, ulong, int>)NativeLibrary.GetExport(lib, "lt_room_leave");
             RoomTicket = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_room_ticket");
             RoomSend = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int>)NativeLibrary.GetExport(lib, "lt_room_send");
+            RoomSendWithHistory = NativeLibrary.TryGetExport(lib, "lt_room_send_with_history", out var historySend)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int>)historySend : null;
+            RoomHistoryEnable = NativeLibrary.TryGetExport(lib, "lt_room_history_enable", out var historyEnable)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, uint, int>)historyEnable : null;
+            ChannelRecordEventsEnable = NativeLibrary.TryGetExport(lib, "lt_channel_record_events_enable", out var recordEvents)
+                ? (delegate* unmanaged[Cdecl]<nint, uint, int>)recordEvents : null;
+            RoomHistoryClear = NativeLibrary.TryGetExport(lib, "lt_room_history_clear", out var historyClear)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, int>)historyClear : null;
             PresenceSet = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, int>)NativeLibrary.GetExport(lib, "lt_presence_set");
             RoomPeers = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, uint*, int>)NativeLibrary.GetExport(lib, "lt_room_peers");
             Connect = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lt_connect");
@@ -160,12 +184,18 @@ internal static unsafe class Native
             BlobOffer = (delegate* unmanaged[Cdecl]<nint, ulong, ulong, int>)NativeLibrary.GetExport(lib, "lt_blob_offer");
             BlobUnoffer = (delegate* unmanaged[Cdecl]<nint, ulong, ulong, int>)NativeLibrary.GetExport(lib, "lt_blob_unoffer");
             BlobFetch = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, int>)NativeLibrary.GetExport(lib, "lt_blob_fetch");
+            BlobFetchBounded = NativeLibrary.TryGetExport(lib, "lt_blob_fetch_bounded", out var boundedFetch)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, byte*, int>)boundedFetch : null;
+            BlobCancelBounded = NativeLibrary.TryGetExport(lib, "lt_blob_cancel_bounded", out var boundedCancel)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, int>)boundedCancel : null;
             BlobHashText = (delegate* unmanaged[Cdecl]<nint, ulong, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_blob_hash_text");
             BookmarkPut = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, byte*, int>)NativeLibrary.GetExport(lib, "lt_bookmark_put");
             BookmarkForget = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lt_bookmark_forget");
             BookmarkList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_bookmark_list");
             ProfileSetName = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lt_profile_set_name");
             PresenceStatusSet = (delegate* unmanaged[Cdecl]<nint, uint, byte*, int>)NativeLibrary.GetExport(lib, "lt_presence_status_set");
+            ActivityTagsSet = NativeLibrary.TryGetExport(lib, "lt_activity_tags_set", out var tagsSet)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, int>)tagsSet : null;
             InviteCreate = (delegate* unmanaged[Cdecl]<nint, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_invite_create");
             InviteAccept = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lt_invite_accept");
             FriendList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_friend_list");
@@ -173,7 +203,19 @@ internal static unsafe class Native
             FriendRemove = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lt_friend_remove");
             FriendHistory = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_friend_history");
             ChannelCreate = (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)NativeLibrary.GetExport(lib, "lt_channel_create");
+            ChannelCreateSealed = NativeLibrary.TryGetExport(lib, "lt_channel_create_sealed", out var sealedCreate)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, ulong*, int>)sealedCreate : null;
+            ChannelReseal = NativeLibrary.TryGetExport(lib, "lt_channel_reseal", out var reseal)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, ulong*, int>)reseal : null;
+            RoomIsSealed = NativeLibrary.TryGetExport(lib, "lt_room_is_sealed", out var isSealed)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, uint*, int>)isSealed : null;
+            BlobAddSealedBytes = NativeLibrary.TryGetExport(lib, "lt_blob_add_sealed_bytes", out var sealedBytes)
+                ? (delegate* unmanaged[Cdecl]<nint, ulong, byte*, uint, byte*, ulong*, int>)sealedBytes : null;
             ChannelInvite = (delegate* unmanaged[Cdecl]<nint, byte*, ulong, int>)NativeLibrary.GetExport(lib, "lt_channel_invite");
+            FriendFileOffer = NativeLibrary.TryGetExport(lib, "lt_friend_file_offer", out var fileOffer)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, ulong, int>)fileOffer : null;
+            FriendFileWithdraw = NativeLibrary.TryGetExport(lib, "lt_friend_file_withdraw", out var fileWithdraw)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, ulong, int>)fileWithdraw : null;
             Block = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lt_block");
             Unblock = (delegate* unmanaged[Cdecl]<nint, byte*, int>)NativeLibrary.GetExport(lib, "lt_unblock");
             BlockedList = (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_blocked_list");
@@ -183,6 +225,12 @@ internal static unsafe class Native
             AuthorJoin = (delegate* unmanaged[Cdecl]<nint, byte*, byte*, uint, ulong*, int>)NativeLibrary.GetExport(lib, "lt_author_join");
             Announcements = (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, nuint, nuint*, int>)NativeLibrary.GetExport(lib, "lt_announcements");
             SelfTest = (delegate* unmanaged[Cdecl]<nint, ulong*, int>)NativeLibrary.GetExport(lib, "lt_selftest");
+            NostrIdentity = NativeLibrary.TryGetExport(lib, "lt_nostr_identity", out var nostrIdentity)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, nuint, nuint*, int>)nostrIdentity : null;
+            NostrSendInvite = NativeLibrary.TryGetExport(lib, "lt_nostr_send_invite", out var nostrSend)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, uint, byte*, uint, ulong*, int>)nostrSend : null;
+            NostrCheckInbox = NativeLibrary.TryGetExport(lib, "lt_nostr_check_inbox", out var nostrInbox)
+                ? (delegate* unmanaged[Cdecl]<nint, byte*, uint, ulong*, int>)nostrInbox : null;
 
             library = lib;
         }

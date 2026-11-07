@@ -34,11 +34,14 @@ Always answers, because it says nothing about anybody else.
 ## GetFriends
 
 ```json
-[{"id":"<64 hex node id>","name":"Bob","online":true,"status":"away","note":"crafting"}]
+[{"id":"<64 hex node id>","name":"Bob","online":true,"status":"away","note":"crafting","tags":["maps","chat"]}]
 ```
 
 `status` is `online`, `away`, `busy`, or `offline` (an invisible friend looks
-offline). `note` is empty for an offline friend. Or `error: …`.
+offline). `note` is empty and `tags` is an empty array for an offline friend.
+`tags` contains only activities the friend chose or typed, with at most eight
+strings of 32 UTF-8 bytes. Older native libraries/friends supply no tags.
+Or `error: …`.
 
 ## SendToFriend
 
@@ -76,3 +79,15 @@ pi.GetIpcSubscriber<string, object>("XivLantern.v1.MessageReceived").Subscribe(j
 
 A caller must expect `IpcNotReadyError` when XivLantern is not installed or
 not loaded, and must treat every string as untrusted text from another player.
+
+### Sealed-channel conversation identities (2026-10-01)
+
+Current IPC status/friend/message payloads do not export channel tickets or
+channel-line events. Internal sealed conversation keys now use
+`c:sealed:<SHA256>` of the canonical ticket rather than `c:<sealed-ticket>`.
+The digest is a routing/mute identifier, not a ticket and cannot be used to
+join or decrypt. Ticket-bearing fields remain in the private saved-channel
+configuration and explicit copy/invite operations. Plain channel and friend
+IDs retain their existing format. Config loading migrates earlier sealed mute
+IDs and preserves their notification/unread policy. This does not encrypt
+the local saved configuration or chat database.

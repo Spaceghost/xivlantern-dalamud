@@ -55,17 +55,20 @@ struct Args {
     port: Option<u16>,
     heartbeat_ms: Option<u64>,
     nostr_relays: Vec<String>,
+    /// Local endpoint tickets known before any rooms start joining.
+    address_hints: Vec<String>,
     /// The author key whose channel to join (64 hex).
     author: Option<[u8; 32]>,
     /// The author's always-on nodes (64 hex each).
     author_nodes: Vec<PeerId>,
     /// This node is the author's: accept support messages.
     author_mode: bool,
+    announcement_file: Option<std::path::PathBuf>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: lantern [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N]\n                 [--author KEYHEX [--author-node NODEID]... | --author-mode KEYHEX] [--nostr-relay WS_URL]...\n       lantern author keygen|pubkey|sign ...   (offline; see lantern author)\n\n{HELP}"
+        "usage: lantern [--db PATH] [--name NAME] [--relay default|off|URL] [--port UDP_PORT] [--heartbeat-ms N]\n                 [--author KEYHEX [--author-node NODEID]... | --author-mode KEYHEX] [--nostr-relay WS_URL]... [--hint NODETICKET]... [--announce-file SIGNED_FILE]\n       lantern author keygen|pubkey|sign ...   (offline; see lantern author)\n\n{HELP}"
     );
     std::process::exit(2)
 }
@@ -78,9 +81,11 @@ fn parse_args() -> Args {
         port: None,
         heartbeat_ms: None,
         nostr_relays: Vec::new(),
+        address_hints: Vec::new(),
         author: None,
         author_nodes: Vec::new(),
         author_mode: false,
+        announcement_file: None,
     };
     let parse_key = |v: String| lantern_core::author::parse_author(&v).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -102,8 +107,10 @@ fn parse_args() -> Args {
             "--port" => args.port = Some(value().parse().unwrap_or_else(|_| usage())),
             "--heartbeat-ms" => args.heartbeat_ms = Some(value().parse().unwrap_or_else(|_| usage())),
             "--nostr-relay" => args.nostr_relays.push(value()),
+            "--hint" => args.address_hints.push(value()),
             "--author" => args.author = Some(parse_key(value())),
             "--author-node" => args.author_nodes.push(parse_key(value())),
+            "--announce-file" => args.announcement_file = Some(value().into()),
             "--author-mode" => {
                 args.author = Some(parse_key(value()));
                 args.author_mode = true;
@@ -111,6 +118,10 @@ fn parse_args() -> Args {
             "-h" | "--help" => usage(),
             _ => usage(),
         }
+    }
+    if args.announcement_file.is_some() && (!args.author_mode || args.author.is_none()) {
+        eprintln!("--announce-file requires --author-mode and its public key");
+        usage();
     }
     args
 }
@@ -536,6 +547,12 @@ fn main() {
         std::process::exit(author::run(&raw[1..]));
     }
     let args = parse_args();
+    let announcement = args.announcement_file.as_ref().map(|path| {
+        match author::verified_file(path, &args.author.expect("author mode was checked")) {
+            Ok((signed, _)) => signed,
+            Err(error) => { eprintln!("announcement file refused: {error}"); std::process::exit(1); }
+        }
+    });
     let mut config = Config {
         db_path: Some(args.db.clone().into()),
         relay: args.relay,
@@ -558,6 +575,12 @@ fn main() {
             eprintln!("name: {e}");
         }
     }
+    for hint in &args.address_hints {
+        if let Err(e) = node.add_address_hint(hint) {
+            eprintln!("address hint: {e}");
+            std::process::exit(1);
+        }
+    }
     let mut cli = Cli {
         node,
         names: HashMap::new(),
@@ -575,12 +598,21 @@ fn main() {
         match cli.node.author_join(&key, &args.author_nodes) {
             Ok(room) => {
                 cli.author_room = Some(room);
+                if let Some(signed) = &announcement {
+                    match cli.node.author_announce(room, signed) {
+                        Ok(seq) => println!("announcement #{seq} queued from verified file"),
+                        Err(error) => { eprintln!("announcement handoff failed: {error}"); std::process::exit(1); }
+                    }
+                }
                 if args.author_mode {
                     println!("author mode: support messages accepted; this node's ticket:");
                     println!("{}", cli.node.node_ticket());
                 }
             }
-            Err(e) => println!("author channel: {e}"),
+            Err(e) => {
+                if announcement.is_some() { eprintln!("announcement channel failed: {e}"); std::process::exit(1); }
+                println!("author channel: {e}");
+            },
         }
     }
     cli.refresh_names();

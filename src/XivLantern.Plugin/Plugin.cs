@@ -26,7 +26,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool aliasRegistered;
 
     public Plugin(IDalamudPluginInterface pluginInterface, IPluginLog log, IFramework framework, ICommandManager commands, IChatGui chat,
-        INotificationManager notifications, IDtrBar dtrBar)
+        INotificationManager notifications, IDtrBar dtrBar, ITextureProvider textures)
     {
         this.pluginInterface = pluginInterface;
         this.log = log;
@@ -35,11 +35,17 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+            config.StatusPresets = StatusPresets.Normalize(config.StatusPresets);
+            config.ActivityTags = ActivityTags.Normalize(config.ActivityTags);
+            config.FriendFolders = FriendFolders.Normalize(config.FriendFolders);
+            config.Muted = ChatBook.NormalizeConversationKeys(config.Muted);
+            config.VerifiedFriends = (config.VerifiedFriends ?? []).Where(p => SafetyWords.ValidId(p.Key) && SafetyWords.ValidId(p.Value))
+                .GroupBy(p => p.Key.ToLowerInvariant()).ToDictionary(g => g.Key, g => g.First().Value, StringComparer.OrdinalIgnoreCase);
             // Dalamud loads the managed assembly from memory; lantern.dll is found by the folder it was installed to.
             var nativeDir = pluginInterface.AssemblyLocation.DirectoryName ?? pluginInterface.ConfigDirectory.FullName;
             pluginInterface.ConfigDirectory.Create();
             service = new LanternService(nativeDir, pluginInterface.ConfigDirectory.FullName, config, Save, log, framework);
-            window = new MainWindow(service, config, Save);
+            window = new MainWindow(service, config, Save, textures);
             windowSystem.AddWindow(window);
             notifier = new Notifier(notifications, dtrBar, framework, log, config, service, window.Toggle);
             ipc = new IpcService(pluginInterface, service, config, who => window.OpenChat(who));
@@ -69,6 +75,7 @@ public sealed class Plugin : IDalamudPlugin
         try
         {
             windowSystem.Draw();
+            if (config.PullTimersEnabled) PullTimerOverlay.Draw(service.Pull);
         }
         catch (Exception ex)
         {
@@ -158,6 +165,19 @@ public sealed class Plugin : IDalamudPlugin
                     Print(err.Length == 0 ? "status: " + c.Arg : err);
                     break;
                 }
+                case Verb.As:
+                {
+                    var err = window.ApplyPreset(c.Arg);
+                    Print(err.Length == 0 ? "status preset: " + ChatText.Label(c.Arg) : err);
+                    break;
+                }
+                case Verb.Pull:
+                {
+                    var error = int.TryParse(c.Arg, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var seconds)
+                        ? service.StartPull(seconds, c.Text) : "Pull duration must be 1–60 seconds.";
+                    Print(error.Length == 0 ? "Lantern pull timer started." : error);
+                    break;
+                }
                 case Verb.Msg:
                 {
                     var (friend, why) = FriendLookup.Find(service.Friends, c.Arg);
@@ -195,6 +215,7 @@ public sealed class Plugin : IDalamudPlugin
         ipc?.Dispose();
         notifier?.Dispose();
         windowSystem.RemoveAllWindows();
+        window?.Dispose();
         service?.Dispose();
     }
 }

@@ -17,12 +17,13 @@
 //! [`Relays`] helper is a thin wrapper over `nostr_sdk::Client` for the node's
 //! background jobs.
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 use iroh::{PublicKey as DeviceKey, SecretKey as DeviceSecret, Signature};
 use nostr_sdk::prelude::{
     Client, Event as NostrEvent, EventBuilder, FinalizeEvent, Filter, Keys, Kind,
     PrivateDirectMessageBuilder, PublicKey, Tag, Timestamp, UnwrappedGift,
+    RelayLimits,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,9 @@ pub use nostr_sdk::prelude::{Keys as NostrKeys, PublicKey as NostrPublicKey};
 pub const DEVICE_LIST_D: &str = "xivlantern/devices";
 /// Marks a NIP-17 rumor as carrying a Lantern friend invite.
 pub const INVITE_TAG: (&str, &str) = ("lantern", "invite/1");
+/// Bound decryption work even when a relay ignores the requested filter limit.
+pub const MAX_INBOX_EVENTS: usize = 128;
+pub const MAX_RELAY_EVENT_BYTES: u32 = 65536;
 const CLAIM_CONTEXT: &[u8] = b"lantern-device-claim/1";
 
 fn nerr(e: impl std::fmt::Display) -> Error {
@@ -213,7 +217,19 @@ impl Relays {
         if urls.is_empty() {
             return Err(Error::Arg("no nostr relays configured"));
         }
-        let client = Client::new();
+        if urls.len() > 8 {
+            return Err(Error::Arg("choose at most eight nostr relays"));
+        }
+        let mut limits = RelayLimits::default();
+        limits.messages.max_size = Some(131072);
+        limits.events.max_size = Some(MAX_RELAY_EVENT_BYTES);
+        limits.events.max_num_tags = Some(64);
+        limits.events.max_num_tags_per_kind.clear();
+        let client = Client::builder()
+            .relay_limits(limits)
+            .max_relays(NonZeroUsize::new(8))
+            .notification_channel_size(NonZeroUsize::new(64).unwrap())
+            .build();
         for url in urls {
             client.add_relay(url.as_str()).await.map_err(net)?;
         }
@@ -234,6 +250,7 @@ impl Relays {
         let events = self
             .client
             .fetch_events(filter)
+            .max_events(MAX_INBOX_EVENTS)
             .timeout(timeout)
             .await
             .map_err(net)?;
@@ -257,9 +274,9 @@ impl Relays {
 
     /// Every Lantern invite gift-wrapped to `me`.
     pub async fn invites(&self, me: &Keys, timeout: Duration) -> Result<Vec<(PublicKey, FriendInvite)>> {
-        let filter = Filter::new().kind(Kind::GiftWrap).pubkey(me.public_key());
+        let filter = Filter::new().kind(Kind::GiftWrap).pubkey(me.public_key()).limit(MAX_INBOX_EVENTS);
         let events = self.fetch(filter, timeout).await?;
-        Ok(events.iter().filter_map(|e| open_invite_dm(me, e)).collect())
+        Ok(events.iter().take(MAX_INBOX_EVENTS).filter_map(|e| open_invite_dm(me, e)).collect())
     }
 
     pub async fn shutdown(self) {

@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Lantern\Lantern.csproj" />
+    <ProjectReference Include="../../../src/XivLantern.Core/XivLantern.Core.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>
 

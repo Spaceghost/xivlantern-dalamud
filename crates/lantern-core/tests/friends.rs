@@ -36,6 +36,82 @@ fn is_online(e: &Event, who: PeerId) -> bool {
 }
 
 #[test]
+fn friend_files_require_explicit_fetch_and_withdraw_without_deleting_saved_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let alice = node("FileAlice", dir.path());
+    let bob = node("FileBob", dir.path());
+    let mut pump = Pump::new();
+    befriend(&mut pump, &alice, &bob);
+    let bytes = vec![42u8; 65537];
+    let blob = alice.blob_add_bytes(&bytes, "clear.png").unwrap();
+    pump.wait(&[&alice, &bob], "friend file prepared", 20, |i, e|
+        i == 0 && matches!(e, Event::BlobDone { blob: h, .. } if *h == blob));
+    assert!(alice.friend_file_offer(&[7; 32], blob).is_err());
+    alice.friend_file_offer(&bob.node_id(), blob).unwrap();
+    let offer = pump.wait(&[&alice, &bob], "friend file offer", 20, |i, e|
+        i == 1 && matches!(e, Event::BlobOffer { room: 0, .. }));
+    let remote = match offer {
+        Event::BlobOffer { peer, blob, meta, .. } => {
+            assert_eq!(peer, alice.node_id());
+            assert_eq!(meta.size, bytes.len() as u64);
+            assert_eq!(meta.name, "clear.png");
+            blob
+        },
+        _ => unreachable!(),
+    };
+    let path = dir.path().join("friend.download");
+    assert!(!path.exists(), "an offer does not transfer a file");
+    bob.blob_fetch_bounded(remote, path.to_str().unwrap()).unwrap();
+    pump.wait(&[&alice, &bob], "friend file saved", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobDone { blob, .. } if *blob == remote));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    alice.friend_file_withdraw(&bob.node_id(), blob).unwrap();
+    pump.wait(&[&alice, &bob], "friend file withdrawn", 20, |i, e|
+        i == 1 && matches!(e, Event::BlobWithdrawn { blob } if *blob == remote));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(bob.blob_fetch_bounded(remote, dir.path().join("stale.download").to_str().unwrap()).is_err());
+}
+
+#[test]
+fn removing_or_blocking_a_friend_forgets_file_offers_before_returning() {
+    for block in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let alice = node("RemoveFileAlice", dir.path());
+        let bob = node("RemoveFileBob", dir.path());
+        let mut pump = Pump::new();
+        befriend(&mut pump, &alice, &bob);
+        let bytes = vec![19u8; 16 * 1024 * 1024];
+        let blob = alice.blob_add_bytes(&bytes, "removed.png").unwrap();
+        pump.wait(&[&alice, &bob], "removal file prepared", 20, |i, e|
+            i == 0 && matches!(e, Event::BlobDone { blob: h, .. } if *h == blob));
+        alice.friend_file_offer(&bob.node_id(), blob).unwrap();
+        let offer = pump.wait(&[&alice, &bob], "removal file offer", 20, |i, e|
+            i == 1 && matches!(e, Event::BlobOffer { room: 0, .. }));
+        let remote = match offer { Event::BlobOffer { blob, .. } => blob, _ => unreachable!() };
+        let active_path = dir.path().join("active-removal.download");
+        bob.blob_fetch_bounded(remote, active_path.to_str().unwrap()).unwrap();
+        if block { bob.block(&alice.node_id()).unwrap(); }
+        else { bob.friend_remove(&alice.node_id()).unwrap(); }
+        let path = dir.path().join("forgotten.download");
+        assert!(bob.blob_fetch_bounded(remote, path.to_str().unwrap()).is_err(), "removal must invalidate the handle synchronously");
+        pump.wait(&[&alice, &bob], "removed file withdrawal", 20, |i, e|
+            i == 1 && matches!(e, Event::BlobWithdrawn { blob } if *blob == remote));
+        if block {
+            bob.unblock(&alice.node_id()).unwrap();
+            assert!(bob.blob_fetch_bounded(remote, path.to_str().unwrap()).is_err(), "unblock must not resurrect retained metadata");
+        }
+        let terminal = pump.wait(&[&alice, &bob], "removed transfer terminal", 30, |i, e|
+            i == 1 && matches!(e, Event::BlobDone { blob, .. } | Event::BlobFailed { blob, .. } if *blob == remote));
+        match terminal {
+            Event::BlobDone { .. } => assert_eq!(std::fs::read(&active_path).unwrap(), bytes, "a completion that won removal remains intact"),
+            Event::BlobFailed { .. } => assert!(!active_path.exists(), "cancellation leaves no partial destination"),
+            _ => unreachable!(),
+        }
+        assert!(!path.exists());
+    }
+}
+
+#[test]
 fn a_friendship_from_invite_to_unfriend() {
     let dir = tempfile::tempdir().expect("tempdir");
     let alice = node("Alice", dir.path());
@@ -57,6 +133,18 @@ fn a_friendship_from_invite_to_unfriend() {
     });
     assert!(alice.friends()[0].online);
     assert!(alice.friends()[0].linked);
+
+    // Activities travel independently of legacy presence. Clearing and
+    // invisible presence must not expose stale activities in friend JSON.
+    alice.set_activity_tags(&["maps".into(), " Maps ".into(), "crafting".into()]).unwrap();
+    pump.until(&[&alice, &bob], "bob sees Alice's activities", 20, || {
+        bob.friends()[0].tags == ["maps", "crafting"]
+    });
+    assert!(bob.friends_json().contains("\"tags\":[\"maps\",\"crafting\"]"));
+    alice.set_activity_tags(&[]).unwrap();
+    pump.until(&[&alice, &bob], "activities clear", 20, || bob.friends()[0].tags.is_empty());
+    alice.set_activity_tags(&["maps".into()]).unwrap();
+    pump.until(&[&alice, &bob], "activities restore", 20, || bob.friends()[0].tags == ["maps"]);
 
     alice.set_presence(Status::Away, "  brb, crafting\n").unwrap();
     let seen = pump.wait(&[&alice, &bob], "bob sees alice away", 20, |i, e| {
@@ -83,6 +171,7 @@ fn a_friendship_from_invite_to_unfriend() {
     });
     assert!(!bob.friends()[0].online);
     assert_eq!(bob.friends()[0].note, "", "an invisible friend's note is not shown");
+    assert!(bob.friends()[0].tags.is_empty(), "invisible activities are not shown");
 
     // ...but texts still flow.
     let id = bob.friend_send(&a_id, "you there?").unwrap();
@@ -142,7 +231,29 @@ fn a_friendship_from_invite_to_unfriend() {
         i == 1 && matches!(e, Event::Message { room: r, data, peer } if *r == bob_room && data == b"pull in 5" && *peer == a_id)
     });
 
+    // The same explicitly selected friend receives a sealed ticket privately.
+    // Receiving it does not join automatically; the application opts in below.
+    let sealed_room = alice.channel_create_sealed("Private static").unwrap();
+    pump.wait(&[&alice, &bob], "sealed channel up", 20, |i, e|
+        i == 0 && matches!(e, Event::RoomJoined { room: r } if *r == sealed_room));
+    alice.channel_invite(&b_id, sealed_room).unwrap();
+    let invite = pump.wait(&[&alice, &bob], "private sealed invitation", 20, |i, e|
+        i == 1 && matches!(e, Event::ChannelInvite { ticket, .. } if ticket.starts_with("ltsealed")));
+    let Event::ChannelInvite { ticket, peer } = invite else { unreachable!() };
+    assert_eq!(peer, a_id);
+    assert!(ticket.parse::<lantern_core::RoomTicket>().is_err());
+    let sealed_bob = bob.room_join(lantern_core::Scope::Custom, "", Some(&ticket)).unwrap();
+    assert!(bob.room_is_sealed(sealed_bob).unwrap());
+    pump.wait(&[&alice, &bob], "sealed invited peers connected", 30, |i, e|
+        i == 1 && matches!(e, Event::PeerJoined { room: r, peer } if *r == sealed_bob && *peer == a_id));
+    alice.room_send(sealed_room, b"private invited conversation").unwrap();
+    pump.wait(&[&alice, &bob], "sealed invited chat", 30, |i, e|
+        i == 1 && matches!(e, Event::Message { room: r, data, .. }
+            if *r == sealed_bob && data == b"private invited conversation"));
+
     // --- offline text waits for the friend to come back ----------------------
+    bob.set_activity_tags(&["chat".into()]).unwrap();
+    pump.until(&[&alice, &bob], "Alice sees Bob's activities before restart", 20, || alice.friends()[0].tags == ["chat"]);
     bob.close();
     drop(bob);
     pump.wait(&[&alice], "alice sees bob leave", 20, |_, e| {
@@ -158,6 +269,7 @@ fn a_friendship_from_invite_to_unfriend() {
     pump.reset(1);
     assert_eq!(bob.node_id(), b_id, "same database, same identity");
     assert_eq!(bob.friends().len(), 1, "the friend list survives a restart");
+    assert_eq!(bob.activity_tags(), ["chat"], "chosen activities survive a restart");
     let seen = pump.wait(&[&alice, &bob], "bob gets the queued text after restart", 30, |i, e| {
         i == 1 && matches!(e, Event::FriendText { .. })
     });
@@ -171,6 +283,7 @@ fn a_friendship_from_invite_to_unfriend() {
     pump.wait(&[&alice, &bob], "alice's queued text is acked", 20, |i, e| {
         i == 0 && matches!(e, Event::FriendDelivered { id, .. } if *id == queued)
     });
+    pump.until(&[&alice, &bob], "activities return after reconnect", 20, || alice.friends()[0].tags == ["chat"]);
     assert_eq!(
         bob.friend_history(&a_id, 100)
             .unwrap()

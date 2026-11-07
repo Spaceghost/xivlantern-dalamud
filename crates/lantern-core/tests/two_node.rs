@@ -197,11 +197,42 @@ fn two_nodes_meet_talk_and_share_a_file() {
     assert_eq!(got.len(), payload.len(), "downloaded the whole file");
     assert_eq!(got, payload, "bytes match, so the hash matched");
 
+    let bounded_out = dir.path().join("bob-bounded.download");
+    b.blob_fetch_bounded(blob_b, bounded_out.to_str().unwrap()).expect("bounded fetch");
+    pump.wait([&a, &b], "bounded download complete", 40, |i, e| {
+        i == 1 && matches!(e, Event::BlobDone { blob, .. } if *blob == blob_b)
+    });
+    assert_eq!(std::fs::read(&bounded_out).unwrap(), payload);
+    std::fs::write(&bounded_out, b"existing local file").unwrap();
+    b.blob_fetch_bounded(blob_b, bounded_out.to_str().unwrap()).expect("queue overwrite rejection");
+    pump.wait([&a, &b], "bounded destination already exists", 40, |i, e| {
+        i == 1 && matches!(e, Event::BlobFailed { blob, .. } if *blob == blob_b)
+    });
+    assert_eq!(std::fs::read(&bounded_out).unwrap(), b"existing local file");
+    b.block(&a.node_id()).unwrap();
+    assert!(b.blob_fetch_bounded(blob_b, dir.path().join("blocked.download").to_str().unwrap()).is_err());
+    b.unblock(&a.node_id()).unwrap();
+
     a.blob_unoffer(room_a, blob_a).expect("unoffer");
+    pump.wait([&a, &b], "remote offer withdrawn", 30, |i, e| {
+        i == 1 && matches!(e, Event::BlobWithdrawn { blob } if *blob == blob_b)
+    });
+    assert!(b.blob_fetch_bounded(blob_b, dir.path().join("withdrawn.download").to_str().unwrap()).is_err());
     assert!(
         !a.is_publishing(room_a),
         "withdrawing the offer must clear the indicator"
     );
+    a.blob_offer(room_a, blob_a).expect("offer again after withdrawal");
+    let offered_again = pump.wait([&a, &b], "bob sees fresh offer", 30, |i, e| {
+        i == 1 && matches!(e, Event::BlobOffer { .. })
+    });
+    let again = match offered_again { Event::BlobOffer { blob, .. } => blob, _ => unreachable!() };
+    assert_ne!(again, blob_b, "removed offers never reuse a stale handle");
+    b.room_leave(room_b).expect("bob leaves file channel");
+    pump.wait([&a, &b], "bob left file channel", 30, |i, e| {
+        i == 1 && matches!(e, Event::RoomLeft { room } if *room == room_b)
+    });
+    assert!(b.blob_fetch_bounded(again, dir.path().join("left-channel.download").to_str().unwrap()).is_err());
 
     // --- direct connection ------------------------------------------------
     let ticket = a.node_ticket();
@@ -298,6 +329,134 @@ fn a_node_with_no_database_opens_in_memory() {
     let a = Node::open(config.clone()).expect("in-memory node opens");
     let b = Node::open(config).expect("and another");
     assert_ne!(a.node_id(), b.node_id(), "no database, so a fresh identity each time");
+    a.close();
+    b.close();
+}
+
+#[test]
+fn sealed_channels_deliver_presence_signed_history_and_reseal() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node("sealed-alice", dir.path());
+    let b = node("sealed-bob", dir.path());
+    let mut pump = Pump::new();
+    a.channel_record_events_enable(true).unwrap();
+    b.channel_record_events_enable(true).unwrap();
+    let room_a = a.channel_create_sealed("Private friends").unwrap();
+    pump.wait([&a, &b], "sealed creator joined", 20, |i, e|
+        i == 0 && matches!(e, Event::RoomJoined { room } if *room == room_a));
+    assert!(a.room_is_sealed(room_a).unwrap());
+    assert_eq!(a.room_scope(room_a).unwrap(), Scope::Custom);
+    let text = a.room_ticket(room_a).unwrap();
+    let ticket: lantern_core::ticket::SealedRoomTicket = text.parse().unwrap();
+    assert!(text.starts_with("ltsealed"));
+    assert!(text.parse::<lantern_core::RoomTicket>().is_err());
+    assert!(b.room_join(Scope::Party, "", Some(&text)).is_err());
+    let forged_plain = lantern_core::RoomTicket::new(ticket.topic, Scope::Custom,
+        "downgrade", ticket.peers.clone()).to_string();
+    assert!(a.room_join(Scope::Custom, "", Some(&forged_plain)).is_err());
+    a.room_history_enable(room_a, true).unwrap();
+    a.room_send_with_history(room_a, "before Bob joined").unwrap();
+    let original = pump.wait([&a, &b], "creator's original signed line", 20, |i, e|
+        i == 0 && matches!(e, Event::ChannelRecord { room, historical: false, .. } if *room == room_a));
+    let Event::ChannelRecord { encoded: original, .. } = original else { unreachable!() };
+    a.presence_set(room_a, b"private greeting").unwrap();
+    let room_b = b.room_join(Scope::Custom, "", Some(&text)).unwrap();
+    b.room_history_enable(room_b, true).unwrap();
+    pump.wait([&a, &b], "Bob joined sealed channel", 30, |i, e|
+        i == 1 && matches!(e, Event::RoomJoined { room } if *room == room_b));
+    pump.wait([&a, &b], "sealed hello presence", 30, |i, e|
+        i == 1 && matches!(e, Event::Presence { room, data, .. } if *room == room_b && data == b"private greeting"));
+    let caught = pump.wait([&a, &b], "encrypted automatic history catch-up", 30, |i, e|
+        i == 1 && matches!(e, Event::ChannelRecord { room, historical: true, .. } if *room == room_b));
+    let Event::ChannelRecord { encoded: caught, peer, .. } = caught else { unreachable!() };
+    assert_eq!(caught, original);
+    assert_eq!(peer, a.node_id());
+    b.presence_set(room_b, b"private update").unwrap();
+    pump.wait([&a, &b], "sealed presence update", 30, |i, e|
+        i == 0 && matches!(e, Event::Presence { room, data, .. } if *room == room_a && data == b"private update"));
+    b.room_send_with_history(room_b, "same private line").unwrap();
+    b.room_send_with_history(room_b, "same private line").unwrap();
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let event = pump.wait([&a, &b], "distinct repeated sealed chat", 30, |i, e|
+            i == 0 && matches!(e, Event::ChannelRecord { room, historical: false, .. } if *room == room_a));
+        let Event::ChannelRecord { encoded, .. } = event else { unreachable!() };
+        let record = lantern_core::channel_history::verify(ticket.topic.as_bytes(), &encoded).unwrap();
+        assert_eq!(record.text(), "same private line");
+        assert!(ids.insert(*record.id()));
+    }
+    // Ordinary plaintext imports cannot be published into a sealed channel.
+    let plain = a.blob_add_bytes(b"private file", "private.png").unwrap();
+    pump.wait([&a, &b], "local plain file prepared", 20, |i, e|
+        i == 0 && matches!(e, Event::BlobDone { blob: done, .. } if *done == plain));
+    assert!(a.blob_offer(room_a, plain).is_err());
+    assert!(!a.is_publishing(room_a));
+    let bytes: Vec<u8> = (0..65537).map(|i| (i % 251) as u8).collect();
+    let blob = a.blob_add_sealed_bytes(room_a, &bytes, "private.png").unwrap();
+    pump.wait([&a, &b], "encrypted file prepared", 20, |i, e|
+        i == 0 && matches!(e, Event::BlobDone { blob: done, .. } if *done == blob));
+    assert_ne!(a.blob_hash(blob).unwrap(), *blake3::hash(&bytes).as_bytes(), "served blob is ciphertext");
+    a.blob_offer(room_a, blob).unwrap();
+    let offer = pump.wait([&a, &b], "sealed file offer", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobOffer { room, .. } if *room == room_b));
+    let Event::BlobOffer { blob: received, meta, .. } = offer else { unreachable!() };
+    assert_eq!(meta.size, bytes.len() as u64);
+    assert_eq!(meta.name, "private.png");
+    let destination = dir.path().join("sealed.download");
+    assert!(!destination.exists(), "offers do not trigger downloads");
+    assert!(b.blob_fetch(received, destination.to_str().unwrap()).is_err(), "generic fetch cannot export ciphertext");
+    b.blob_fetch_bounded(received, destination.to_str().unwrap()).unwrap();
+    pump.wait([&a, &b], "authenticated decrypted file saved", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobDone { blob, .. } if *blob == received));
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    b.blob_fetch_bounded(received, destination.to_str().unwrap()).unwrap();
+    pump.wait([&a, &b], "sealed file refuses overwrite", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobFailed { blob, .. } if *blob == received));
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    a.blob_unoffer(room_a, blob).unwrap();
+    pump.wait([&a, &b], "sealed file withdrawn", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobWithdrawn { blob, .. } if *blob == received));
+    assert!(b.blob_fetch_bounded(received, dir.path().join("stale.download").to_str().unwrap()).is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+    // Maximum-size encrypted file cancellation follows the same terminal
+    // rules as ordinary bounded downloads: intact completion or no partial.
+    let large = vec![91; 16 * 1024 * 1024];
+    let large_blob = a.blob_add_sealed_bytes(room_a, &large, "large.bin").unwrap();
+    pump.wait([&a, &b], "maximum encrypted file prepared", 30, |i, e|
+        i == 0 && matches!(e, Event::BlobDone { blob, .. } if *blob == large_blob));
+    a.blob_offer(room_a, large_blob).unwrap();
+    let offer = pump.wait([&a, &b], "maximum sealed file offer", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobOffer { room, meta, .. } if *room == room_b && meta.size == large.len() as u64));
+    let Event::BlobOffer { blob: large_received, .. } = offer else { unreachable!() };
+    let canceled_path = dir.path().join("sealed-canceled.download");
+    b.blob_fetch_bounded(large_received, canceled_path.to_str().unwrap()).unwrap();
+    let _ = b.blob_cancel_bounded(large_received); // A complete save may win a race.
+    let terminal = pump.wait([&a, &b], "encrypted file cancellation terminal", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobDone { blob, .. } | Event::BlobFailed { blob, .. } if *blob == large_received));
+    match terminal {
+        Event::BlobDone { .. } => assert_eq!(std::fs::read(&canceled_path).unwrap(), large),
+        Event::BlobFailed { .. } => assert!(!canceled_path.exists()),
+        _ => unreachable!(),
+    }
+    a.blob_unoffer(room_a, large_blob).unwrap();
+    pump.wait([&a, &b], "canceled encrypted offer withdrawn", 30, |i, e|
+        i == 1 && matches!(e, Event::BlobWithdrawn { blob, .. } if *blob == large_received));
+    assert!(b.blob_fetch_bounded(large_received, canceled_path.to_str().unwrap()).is_err());
+    let next_a = a.channel_reseal(room_a).unwrap();
+    pump.wait([&a, &b], "resealed creator joined", 20, |i, e|
+        i == 0 && matches!(e, Event::RoomJoined { room } if *room == next_a));
+    assert!(a.blob_offer(next_a, blob).is_err(), "old encrypted file must be prepared again under the new key");
+    let next_text = a.room_ticket(next_a).unwrap();
+    let next_ticket: lantern_core::ticket::SealedRoomTicket = next_text.parse().unwrap();
+    assert_ne!(ticket.topic, next_ticket.topic);
+    let next_b = b.room_join(Scope::Custom, "", Some(&next_text)).unwrap();
+    pump.wait([&a, &b], "resealed peers connected", 30, |i, e|
+        i == 1 && matches!(e, Event::PeerJoined { room, .. } if *room == next_b));
+    a.room_send(next_a, b"new key conversation").unwrap();
+    pump.wait([&a, &b], "new sealed channel chat", 30, |i, e|
+        i == 1 && matches!(e, Event::Message { room, data, .. } if *room == next_b && data == b"new key conversation"));
+    assert!(!pump.log.iter().any(|(i, e)| *i == 1 && matches!(e,
+        Event::Message { room, data, .. } if *room == room_b && data == b"new key conversation")));
     a.close();
     b.close();
 }

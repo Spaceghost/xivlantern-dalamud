@@ -6,6 +6,8 @@ mod friends;
 #[cfg(feature = "nostr")]
 mod nostr;
 mod selftest;
+mod history;
+mod sealed_room;
 
 pub use friends::{FriendInfo, HistoryEntry, PreparedInvite};
 
@@ -40,7 +42,7 @@ use crate::{
     event::{BlobMeta, Event, PeerId},
     proto::{self, Frame},
     store::Store,
-    ticket::{NodeTicket, RoomTicket, Scope},
+    ticket::{NodeTicket, RoomTicket, SealedRoomTicket, Scope},
     ratelimit::Limits,
     BlobHandle, ConnHandle, Error, Result, RoomHandle, GOSSIP_MAX_FRAME, MAX_MESSAGE,
     MAX_ROOM_MESSAGE,
@@ -76,10 +78,14 @@ pub struct StatsSnapshot {
 #[derive(Debug, Clone)]
 struct RoomState {
     topic: TopicId,
+    sealed: Option<SealedRoomTicket>,
     scope: Scope,
     label: String,
     peers: BTreeSet<EndpointId>,
     joined: bool,
+    history_enabled: bool,
+    history_request: Option<history::Request>,
+    history_generation: Arc<AtomicU64>,
     /// Set for an author channel: only announcements signed by this key are
     /// surfaced, and nothing else from the room is.
     author: Option<[u8; 32]>,
@@ -88,12 +94,46 @@ struct RoomState {
 }
 
 #[derive(Debug, Clone)]
+struct SealedFile {
+    ticket: SealedRoomTicket,
+    encrypted_size: u64,
+}
+
+#[derive(Debug, Clone)]
 struct BlobState {
+    sealed: Option<SealedFile>,
     hash: Option<[u8; 32]>,
     name: String,
     size: u64,
     /// Where to fetch it from, for a blob we learned about from an offer.
     from: Option<EndpointId>,
+    room: Option<RoomHandle>,
+}
+
+fn remote_offer_allowed(blobs: &HashMap<BlobHandle, BlobState>, room: RoomHandle,
+    from: EndpointId, hash: [u8; 32], name: &str) -> bool {
+    !name.is_empty() && name.len() <= 1024 && !name.chars().any(char::is_control)
+        && blobs.values().filter(|s| s.from.is_some()).count() < 128
+        && blobs.values().filter(|s| s.from == Some(from)).count() < 8
+        && !blobs.values().any(|s| s.from == Some(from) && s.room == Some(room) && s.hash == Some(hash))
+}
+
+struct FileJob {
+    shared: Arc<Shared>,
+    blob: BlobHandle,
+    cancel: tokio::sync::watch::Receiver<bool>,
+}
+impl Drop for FileJob {
+    fn drop(&mut self) { self.shared.file_jobs.lock().unwrap().remove(&self.blob); }
+}
+
+// A failed/canceled save never leaves a partial file after the owning task exits.
+struct PartialFile { path: PathBuf, keep: bool, file: Option<tokio::fs::File> }
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.keep { let _ = std::fs::remove_file(&self.path); }
+    }
 }
 
 struct Shared {
@@ -103,7 +143,18 @@ struct Shared {
     rooms: RwLock<HashMap<RoomHandle, RoomState>>,
     conns: RwLock<HashMap<ConnHandle, EndpointId>>,
     blobs: RwLock<HashMap<BlobHandle, BlobState>>,
+    file_downloads: Arc<tokio::sync::Semaphore>,
+    file_jobs: Mutex<HashMap<BlobHandle, (EndpointId, tokio::sync::watch::Sender<bool>)>>,
     store: Mutex<Store>,
+    /// At most four bounded history fetches per node, including all rooms.
+    history_downloads: tokio::sync::Semaphore,
+    history_serving: tokio::sync::Semaphore,
+    history_cache: Mutex<history::Cache>,
+    history_alpn: Vec<u8>,
+    history_revision: AtomicU64,
+    history_metadata: AtomicBool,
+    history_events: Mutex<history::delivery::Delivery>,
+    poll_history_turn: AtomicBool,
     next: AtomicU64,
     stats: Stats,
     ev: Mutex<std::sync::mpsc::SyncSender<Event>>,
@@ -134,6 +185,30 @@ struct Shared {
 }
 
 impl Shared {
+    /// All normal room frame paths go through the room's immutable sealing mode.
+    fn encode_room(&self, room: RoomHandle, frame: &Frame) -> Result<Vec<u8>> {
+        let sealed = self.rooms.read().unwrap().get(&room).ok_or(Error::NotFound)?.sealed.clone();
+        match sealed {
+            Some(ticket) => proto::encode_sealed(&self.secret, &ticket, frame),
+            None if matches!(frame, Frame::BlobOffer { .. } | Frame::BlobUnoffer { .. }) =>
+                proto::encode_file_offer(&self.secret, frame).ok_or(Error::State("file offer randomness unavailable")),
+            None => Ok(proto::encode(&self.secret, frame)),
+        }
+    }
+
+    fn forget_remote_blobs(&self, remove: impl Fn(&BlobState) -> bool) {
+        let removed = {
+            let mut blobs = self.blobs.write().unwrap();
+            let handles: Vec<_> = blobs.iter().filter(|(_, s)| s.from.is_some() && remove(s)).map(|(h, _)| *h).collect();
+            for handle in &handles { blobs.remove(handle); }
+            handles
+        };
+        let jobs = self.file_jobs.lock().unwrap();
+        for blob in removed {
+            if let Some((_, cancel)) = jobs.get(&blob) { let _ = cancel.send(true); }
+            self.emit(Event::BlobWithdrawn { blob });
+        }
+    }
     fn handle(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
@@ -141,6 +216,12 @@ impl Shared {
     /// Never blocks and never fails loudly: a caller that stops polling must not
     /// be able to wedge the network tasks.
     fn emit(&self, event: Event) {
+        if matches!(&event, Event::ChannelRecord { .. } | Event::ChannelHistoryCleared { .. }) {
+            if self.history_events.lock().unwrap().push(event) {
+                self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
         let tx = self.ev.lock().expect("event sender poisoned");
         if tx.try_send(event).is_err() {
             self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
@@ -196,6 +277,10 @@ enum Cmd {
         bootstrap: Vec<EndpointAddr>,
     },
     RoomLeave(RoomHandle),
+    HistoryEnable { room: RoomHandle, enabled: bool },
+    HistoryClear(RoomHandle),
+    HistoryPublish { room: RoomHandle, text: String },
+    HistoryFetch { room: RoomHandle, provider: EndpointId, hash: [u8; 32], size: u64 },
     RoomBroadcast {
         room: RoomHandle,
         frame: Frame,
@@ -214,6 +299,7 @@ enum Cmd {
         blob: BlobHandle,
         data: Vec<u8>,
     },
+    BlobAddSealedBytes { blob: BlobHandle, data: Vec<u8>, ticket: SealedRoomTicket },
     BlobAddFile {
         blob: BlobHandle,
         path: PathBuf,
@@ -223,6 +309,16 @@ enum Cmd {
         hash: [u8; 32],
         from: Option<EndpointId>,
         out: PathBuf,
+    },
+    BlobFetchBounded {
+        blob: BlobHandle,
+        hash: [u8; 32],
+        from: EndpointId,
+        size: u64,
+        sealed: Option<SealedFile>,
+        out: PathBuf,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        job: FileJob,
     },
     Shutdown,
 }
@@ -320,10 +416,27 @@ struct Runner {
 
 impl Runner {
     async fn run(mut self, mut rx: UnboundedReceiver<Cmd>) {
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                Cmd::Shutdown => break,
-                other => self.handle(other).await,
+        let mut history_maintenance = tokio::time::interval(Duration::from_secs(60));
+        history_maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut history_retry = tokio::time::interval(Duration::from_secs(2));
+        history_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = history_retry.tick() => history::tick(&self.shared, &self.senders).await,
+                cmd = rx.recv() => match cmd {
+                    None | Some(Cmd::Shutdown) => break,
+                    Some(other) => self.handle(other).await,
+                },
+                _ = history_maintenance.tick() => {
+                    if let Err(e) = self.shared.store.lock().unwrap()
+                        .channel_history_prune(crate::store::now_ms()) {
+                        self.shared.error(format!("history maintenance failed: {e}"));
+                    }
+                    if let Err(e) = self.shared.store.lock().unwrap()
+                        .channel_peer_hint_prune(crate::store::now_ms()) {
+                        self.shared.error(format!("provider hint maintenance failed: {e}"));
+                    }
+                }
             }
         }
         for (_, task) in self.tasks.drain() {
@@ -340,8 +453,110 @@ impl Runner {
                 bootstrap,
             } => self.room_join(room, topic, bootstrap).await,
             Cmd::RoomLeave(room) => self.room_leave(room),
+            Cmd::HistoryClear(room) => {
+                let topic = {
+                    let mut rooms = self.shared.rooms.write().unwrap();
+                    rooms.get_mut(&room).map(|s| { s.history_request = None; (s.topic, s.history_generation.clone()) })
+                };
+                if let Some((topic, generation)) = topic {
+                    let mut store = self.shared.store.lock().unwrap();
+                    generation.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = store.channel_history_clear(topic.as_bytes()) {
+                        self.shared.error(format!("history clear failed: {e}"));
+                        return;
+                    }
+                    self.shared.history_cache.lock().unwrap().leave(room);
+                    self.shared.history_revision.fetch_add(1, Ordering::Relaxed);
+                    self.shared.emit(Event::ChannelHistoryCleared { room });
+                }
+            }
+            Cmd::HistoryEnable { room, enabled } => {
+                if let Some(state) = self.shared.rooms.write().unwrap().get_mut(&room) {
+                    state.history_enabled = enabled;
+                    state.history_request = None;
+                    state.history_generation.fetch_add(1, Ordering::Relaxed);
+                }
+                if !enabled { self.shared.history_cache.lock().unwrap().leave(room); }
+                if enabled {
+                    let topic = self.shared.rooms.read().unwrap().get(&room).map(|s| s.topic);
+                    if let Some(topic) = topic {
+                        let records = self.shared.store.lock().unwrap().channel_history_read(topic.as_bytes(), crate::store::now_ms());
+                        match records {
+                            Ok(records) => for record in records { history::emit(&self.shared, room, &record, true); },
+                            Err(e) => self.shared.error(format!("history load failed: {e}")),
+                        }
+                    }
+                }
+                if let Some(tx) = self.senders.get(&room) {
+                    history::request(&self.shared, room, tx, true).await;
+                }
+            }
+            Cmd::HistoryFetch { room, provider, hash, size } => {
+                let state = self.shared.rooms.read().unwrap().get(&room).map(|s| (s.topic, s.history_generation.clone(), s.history_generation.load(Ordering::Relaxed), s.sealed.clone()));
+                let Some((topic, generation, expected_generation, sealed)) = state else { return; };
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    let records = match crate::channel_history::network::fetch_snapshot_over(
+                        &shared.endpoint, &shared.history_downloads, provider, hash, size, topic.as_bytes(),
+                        iroh_blobs::ALPN, sealed.as_ref(),
+                    ).await {
+                        Ok(records) => records,
+                        Err(e) => { shared.error(format!("history fetch failed: {e}")); return; }
+                    };
+                    if shared.closed.load(Ordering::Relaxed) || shared.is_blocked(&provider) || !shared.rooms.read().unwrap().contains_key(&room) {
+                        return;
+                    }
+                    let inserted = match history::ingest_snapshot(&shared, room, &topic, &generation, expected_generation, records) {
+                        Ok(Some(inserted)) => inserted,
+                        Ok(None) => return,
+                        Err(e) => { shared.error(format!("history storage failed: {e}")); return; }
+                    };
+                    // Historical data must never be emitted as live Message events:
+                    // that would replay pull timers and channel notifications.
+                    shared.emit(Event::Log { message: format!("channel history fetched: {inserted} new verified records") });
+                });
+            }
+            Cmd::HistoryPublish { room, text } => {
+                let topic = self.shared.rooms.read().unwrap().get(&room).map(|s| s.topic);
+                let Some(topic) = topic else { return; };
+                let received_at = crate::store::now_ms();
+                let record = match crate::channel_history::sign(
+                    &self.shared.secret, *topic.as_bytes(), received_at, &text,
+                ) {
+                    Ok(record) => record,
+                    Err(e) => { self.shared.error(format!("history signing failed: {e}")); return; }
+                };
+                if let Err(e) = self.shared.store.lock().unwrap().channel_history_insert(
+                    topic.as_bytes(), &record, received_at,
+                ) {
+                    self.shared.error(format!("history storage failed: {e}"));
+                    return;
+                }
+                self.shared.history_revision.fetch_add(1, Ordering::Relaxed);
+                if let Some(verified) = crate::channel_history::verify_sender(topic.as_bytes(), self.shared.secret.public(), &record) {
+                    history::emit(&self.shared, room, &verified, false);
+                }
+                if let Some(tx) = self.senders.get(&room) {
+                    let sealed = self.shared.rooms.read().unwrap().get(&room).and_then(|s| s.sealed.clone());
+                    let encoded = match sealed {
+                        Some(ticket) => proto::encode_sealed(&self.shared.secret, &ticket, &Frame::HistoryRecord(record)).ok(),
+                        None => proto::encode_history(&self.shared.secret, topic.as_bytes(), &record),
+                    };
+                    let Some(bytes) = encoded else {
+                        self.shared.error("history encoding failed");
+                        return;
+                    };
+                    self.shared.stats.bytes_sent.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    if let Err(e) = tx.broadcast(bytes.into()).await {
+                        self.shared.error(format!("broadcast failed: {e}"));
+                    }
+                }
+            }
             Cmd::RoomBroadcast { room, frame } => {
-                let bytes = proto::encode(&self.shared.secret, &frame);
+                let bytes = match self.shared.encode_room(room, &frame) {
+                    Ok(bytes) => bytes,
+                    Err(error) => { self.shared.error(format!("room encoding failed: {error}")); return; }
+                };
                 self.shared
                     .stats
                     .bytes_sent
@@ -361,6 +576,19 @@ impl Runner {
             }
             Cmd::Friend(cmd) => friends::handle(&self.shared, cmd),
             Cmd::BlobAddBytes { blob, data } => self.blob_add_bytes(blob, data).await,
+            Cmd::BlobAddSealedBytes { blob, data, ticket } => {
+                let size = data.len() as u64;
+                let result = match crate::sealed_file::encode(&self.shared.secret, &ticket, &data) {
+                    Ok(encrypted) => {
+                        if let Some(state) = self.shared.blobs.write().unwrap().get_mut(&blob) {
+                            state.sealed = Some(SealedFile { ticket, encrypted_size: encrypted.len() as u64 });
+                        }
+                        self.blobs.add_bytes(encrypted).await.map(|tag| *tag.hash.as_bytes()).map_err(|e| e.to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                self.finish_add(blob, result, size).await;
+            },
             Cmd::BlobAddFile { blob, path } => self.blob_add_file(blob, path).await,
             Cmd::BlobFetch {
                 blob,
@@ -368,12 +596,81 @@ impl Runner {
                 from,
                 out,
             } => self.blob_fetch(blob, hash, from, out).await,
+            Cmd::BlobFetchBounded { blob, hash, from, size, sealed, out, permit, mut job } => {
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let result: anyhow::Result<()> = async {
+                        if shared.is_blocked(&from) { anyhow::bail!("file sender is blocked"); }
+                        if *job.cancel.borrow() { anyhow::bail!("file download canceled"); }
+                        let (wire_size, maximum) = match &sealed {
+                            Some(file) => (file.encrypted_size, crate::sealed_file::MAX_CIPHERTEXT_BYTES),
+                            None => (size, crate::bounded_blob::MAX_FILE_BYTES),
+                        };
+                        let bytes = tokio::select! {
+                            biased;
+                            _ = job.cancel.changed() => { anyhow::bail!("file download canceled"); }
+                            result = crate::bounded_blob::fetch(&shared.endpoint, from.into(), hash,
+                                wire_size, maximum, iroh_blobs::ALPN) => result?,
+                        };
+                        let bytes = match &sealed {
+                            Some(file) => crate::sealed_file::decode(&file.ticket, from, &bytes, size)
+                                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                            None => bytes,
+                        };
+                        if *job.cancel.borrow() { anyhow::bail!("file download canceled"); }
+                        if shared.is_blocked(&from) { anyhow::bail!("file sender is blocked"); }
+                        // Never overwrite an existing file or follow its final symlink.
+                        let file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&out).await?;
+                        let mut partial = PartialFile { path: out.clone(), keep: false, file: Some(file) };
+                        use tokio::io::AsyncWriteExt;
+                        let saved: anyhow::Result<()> = async {
+                            if *job.cancel.borrow() { anyhow::bail!("file download canceled"); }
+                            tokio::select! {
+                                biased;
+                                _ = job.cancel.changed() => { anyhow::bail!("file download canceled"); }
+                                result = async {
+                                    let file = partial.file.as_mut().unwrap();
+                                    file.write_all(&bytes).await?; file.sync_all().await
+                                } => { result?; }
+                            }
+                            if *job.cancel.borrow() || shared.is_blocked(&from) { anyhow::bail!("file download canceled"); }
+                            Ok(())
+                        }.await;
+                        // On Windows the file must close before the partial guard removes it.
+                        partial.file.take();
+                        saved?;
+                        partial.keep = true;
+                        shared.emit(Event::BlobProgress { blob, done: size, total: size });
+                        Ok(())
+                    }.await;
+                    match result {
+                        Ok(()) => shared.emit(Event::BlobDone { blob, detail: out.display().to_string() }),
+                        Err(error) => shared.emit(Event::BlobFailed { blob, reason: error.to_string() }),
+                    }
+                });
+            }
         }
     }
 
-    async fn room_join(&mut self, room: RoomHandle, topic: TopicId, bootstrap: Vec<EndpointAddr>) {
+    async fn room_join(&mut self, room: RoomHandle, topic: TopicId, mut bootstrap: Vec<EndpointAddr>) {
+        let sealed = self.shared.rooms.read().unwrap().get(&room).and_then(|s| s.sealed.clone());
+        // Persist a key fingerprint before subscription: an ordinary join must
+        // never expose this topic's saved sealed history, including after restart.
+        let registered = sealed_room::register(&mut self.shared.store.lock().unwrap(), &topic, sealed.as_ref());
+        if let Err(error) = registered {
+            self.shared.error(format!("room sealing admission failed: {error}"));
+            self.shared.rooms.write().unwrap().remove(&room);
+            self.shared.history_events.lock().unwrap().forget(room);
+            return;
+        }
+        bootstrap.extend(match &sealed {
+            Some(ticket) => history::known_providers_sealed(&self.shared, &topic, Some(ticket)),
+            None => history::known_providers(&self.shared, &topic),
+        });
         let mut ids = Vec::new();
         for addr in bootstrap {
+            if self.shared.is_blocked(&addr.id) || ids.contains(&addr.id) { continue; }
             ids.push(addr.id);
             self.lookup.add_endpoint_info(addr);
         }
@@ -397,6 +694,7 @@ impl Runner {
         let secret = self.shared.secret.clone();
         let author = self.shared.rooms.read().unwrap().get(&room).and_then(|s| s.author);
         let task = tokio::spawn(async move {
+            let mut replay = sealed_room::Replay::default();
             while let Some(next) = rx.next().await {
                 let event = match next {
                     Ok(e) => e,
@@ -437,8 +735,10 @@ impl Runner {
                             .get(&room)
                             .cloned()
                             .unwrap_or_default();
-                        let bytes = proto::encode(&secret, &Frame::Hello { presence: mine });
-                        let _ = tx.broadcast_neighbors(bytes.into()).await;
+                        if let Ok(bytes) = shared.encode_room(room, &Frame::Hello { presence: mine }) {
+                            let _ = tx.broadcast_neighbors(bytes.into()).await;
+                        }
+                        history::request(&shared, room, &tx, false).await;
                     }
                     GossipEvent::NeighborDown(peer) => {
                         shared
@@ -463,13 +763,18 @@ impl Runner {
                             .stats
                             .bytes_recv
                             .fetch_add(msg.content.len() as u64, Ordering::Relaxed);
-                        let Some((from, frame)) = proto::decode(&msg.content) else {
+                        let decoded = match &sealed {
+                            Some(ticket) => proto::decode_sealed(ticket, &msg.content),
+                            None => proto::decode(&msg.content),
+                        };
+                        let Some((from, frame)) = decoded else {
                             // Unsigned, forged or from a future protocol.
                             continue;
                         };
                         if shared.is_blocked(&from) || !shared.allow(&from, "room") {
                             continue;
                         }
+                        if sealed.is_some() && !replay.admit(&msg.content) { continue; }
                         if let Some(author) = author {
                             if let Frame::App(data) = frame {
                                 author_frame(&shared, room, &author, &data);
@@ -494,24 +799,77 @@ impl Runner {
                                 data: presence,
                             }),
                             Frame::BlobOffer { hash, size, name } => {
+                                // Sealed file-byte encryption is still being wired.
+                                if sealed.is_some() { continue; }
+                                // Keep room admission through insertion/emission so a
+                                // concurrent leave cannot be followed by a stale offer.
+                                let blocked = shared.blocked.read().unwrap();
+                                if blocked.contains(&from) { continue; }
+                                let rooms = shared.rooms.read().unwrap();
+                                if !rooms.contains_key(&room) { continue; }
+                                let mut blobs = shared.blobs.write().unwrap();
+                                if !remote_offer_allowed(&blobs, room, from, hash, &name) { continue; }
                                 let blob = shared.handle();
-                                shared.blobs.write().unwrap().insert(
+                                blobs.insert(
                                     blob,
                                     BlobState {
+                                        sealed: None,
                                         hash: Some(hash),
                                         name: name.clone(),
                                         size,
                                         from: Some(from),
+                                        room: Some(room),
                                     },
                                 );
+                                drop(blobs);
                                 shared.emit(Event::BlobOffer {
                                     room,
                                     peer,
                                     blob,
                                     meta: BlobMeta { hash, size, name },
                                 });
+                                drop(rooms);
+                                drop(blocked);
                             }
-                            Frame::BlobUnoffer { .. } => {}
+                            Frame::SealedBlobOffer { hash, size, encrypted_size, name } => {
+                                let Some(ticket) = &sealed else { continue; };
+                                if size > crate::bounded_blob::MAX_FILE_BYTES
+                                    || encrypted_size < size || encrypted_size > size.saturating_add(256)
+                                    || encrypted_size > crate::sealed_file::MAX_CIPHERTEXT_BYTES { continue; }
+                                let blocked = shared.blocked.read().unwrap();
+                                if blocked.contains(&from) { continue; }
+                                let rooms = shared.rooms.read().unwrap();
+                                if !rooms.contains_key(&room) { continue; }
+                                let mut blobs = shared.blobs.write().unwrap();
+                                if !remote_offer_allowed(&blobs, room, from, hash, &name) { continue; }
+                                let blob = shared.handle();
+                                blobs.insert(blob, BlobState {
+                                    sealed: Some(SealedFile { ticket: ticket.clone(), encrypted_size }),
+                                    hash: Some(hash), name: name.clone(), size, from: Some(from), room: Some(room),
+                                });
+                                drop(blobs);
+                                shared.emit(Event::BlobOffer { room, peer, blob, meta: BlobMeta { hash, size, name } });
+                            }
+                            Frame::BlobUnoffer { hash } => shared.forget_remote_blobs(|s|
+                                s.room == Some(room) && s.from == Some(from) && s.hash == Some(hash)),
+                            Frame::HistoryRequest { topic: frame_topic, nonce, attempt } => history::offer(&shared, room, &tx, from, frame_topic, nonce, attempt).await,
+                            Frame::HistoryOffer { topic: frame_topic, to, nonce, attempt, hash, size, provider } => history::receive_offer(shared.clone(), room, from, frame_topic, to, nonce, attempt, hash, size, provider, &msg.content),
+                            Frame::HistoryRecord(encoded) => {
+                                let Some(record) = crate::channel_history::verify_sender(topic.as_bytes(), from, &encoded) else { continue; };
+                                let stored = shared.store.lock().unwrap().channel_history_insert(
+                                    topic.as_bytes(), &encoded, crate::store::now_ms(),
+                                );
+                                match stored {
+                                    Ok(true) => {
+                                        shared.history_revision.fetch_add(1, Ordering::Relaxed);
+                                        if !history::emit(&shared, room, &record, false) {
+                                            shared.emit(Event::Message { room, peer, data: record.text().as_bytes().to_vec() });
+                                        }
+                                    },
+                                    Ok(false) => {},
+                                    Err(e) => shared.error(format!("history storage failed: {e}")),
+                                }
+                            }
                         }
                     }
                 }
@@ -521,11 +879,16 @@ impl Runner {
     }
 
     fn room_leave(&mut self, room: RoomHandle) {
+        self.shared.history_cache.lock().unwrap().leave(room);
+        self.shared.history_events.lock().unwrap().forget(room);
         self.senders.remove(&room);
         if let Some(task) = self.tasks.remove(&room) {
             task.abort();
         }
-        self.shared.rooms.write().unwrap().remove(&room);
+        if let Some(state) = self.shared.rooms.write().unwrap().remove(&room) {
+            state.history_generation.fetch_add(1, Ordering::Relaxed);
+        }
+        self.shared.forget_remote_blobs(|s| s.room == Some(room));
         self.presence.write().unwrap().remove(&room);
         self.shared.emit(Event::RoomLeft { room });
     }
@@ -735,6 +1098,7 @@ impl Node {
 
         let mut store = Store::open(config.db_path.as_deref())?;
         let secret = store.identity()?;
+        store.channel_peer_hint_prune(crate::store::now_ms())?;
 
         let (ev_tx, ev_rx) = std::sync::mpsc::sync_channel(config.event_queue_cap.max(16));
         let lookup = MemoryLookup::new();
@@ -777,7 +1141,17 @@ impl Node {
             rooms: RwLock::new(HashMap::new()),
             conns: RwLock::new(HashMap::new()),
             blobs: RwLock::new(HashMap::new()),
+            file_downloads: Arc::new(tokio::sync::Semaphore::new(2)),
+            file_jobs: Mutex::new(HashMap::new()),
             store: Mutex::new(store),
+            history_downloads: tokio::sync::Semaphore::new(4),
+            history_serving: tokio::sync::Semaphore::new(4),
+            history_cache: Mutex::new(history::Cache::default()),
+            history_alpn: format!("{}/history-blob/1", config.app_id).into_bytes(),
+            history_revision: AtomicU64::new(0),
+            history_metadata: AtomicBool::new(false),
+            history_events: Mutex::new(history::delivery::Delivery::default()),
+            poll_history_turn: AtomicBool::new(false),
             // Handle 0 is reserved for "none".
             next: AtomicU64::new(1),
             stats: Stats::default(),
@@ -839,6 +1213,7 @@ impl Node {
                 Router::builder(endpoint.clone())
                     .accept(iroh_gossip::ALPN, gossip.clone())
                     .accept(iroh_blobs::ALPN, blobs_proto)
+                    .accept(shared.history_alpn.clone(), history::Protocol { shared: shared.clone() })
                     .accept(
                         alpn.clone(),
                         DirectProtocol {
@@ -895,6 +1270,8 @@ impl Node {
             return;
         }
         self.shared.closed.store(true, Ordering::SeqCst);
+        for (_, cancel) in self.shared.file_jobs.lock().unwrap().values() { let _ = cancel.send(true); }
+        *self.shared.history_events.lock().unwrap() = history::delivery::Delivery::default();
         let _ = self.cmd.send(Cmd::Shutdown);
         if let Ok(mut r) = self._router.lock() {
             if let (Some(router), Some(rt)) = (r.take(), self.rt.as_ref()) {
@@ -939,11 +1316,15 @@ impl Node {
     pub fn poll(&self, max: usize) -> Vec<Event> {
         let rx = self.events.lock().expect("event receiver poisoned");
         let mut out = Vec::new();
+        let mut history_first = self.shared.poll_history_turn.fetch_xor(true, Ordering::Relaxed);
         while out.len() < max {
-            match rx.try_recv() {
-                Ok(e) => out.push(e),
-                Err(_) => break,
-            }
+            let event = if history_first {
+                self.shared.history_events.lock().unwrap().pop().or_else(|| rx.try_recv().ok())
+            } else {
+                rx.try_recv().ok().or_else(|| self.shared.history_events.lock().unwrap().pop())
+            };
+            match event { Some(e) => out.push(e), None => break }
+            history_first = !history_first;
         }
         out
     }
@@ -988,6 +1369,13 @@ impl Node {
         ticket: Option<&str>,
     ) -> Result<RoomHandle> {
         self.check_open()?;
+        if let Some(text) = ticket {
+            if text.trim().starts_with(crate::ticket::SEALED_TICKET_PREFIX) {
+                if scope != Scope::Custom { return Err(Error::Arg("sealed tickets require custom channel scope")); }
+                let t: SealedRoomTicket = text.parse()?;
+                return self.join(Scope::Custom, t.topic, t.peers.clone(), t.label.clone(), None, Some(t));
+            }
+        }
         let (topic, bootstrap, label) = match ticket {
             Some(text) => {
                 let t: RoomTicket = text.parse()?;
@@ -1004,7 +1392,7 @@ impl Node {
                 )
             }
         };
-        self.join(scope, topic, bootstrap, label, None)
+        self.join(scope, topic, bootstrap, label, None, None)
     }
 
     fn join(
@@ -1014,25 +1402,42 @@ impl Node {
         bootstrap: Vec<EndpointAddr>,
         label: String,
         author: Option<[u8; 32]>,
+        sealed: Option<SealedRoomTicket>,
     ) -> Result<RoomHandle> {
         let room = self.shared.handle();
-        self.shared.rooms.write().unwrap().insert(
+        self.shared.history_events.lock().unwrap().register(room);
+        let mut rooms = self.shared.rooms.write().unwrap();
+        if rooms.values().any(|state| state.topic == topic &&
+            match (&state.sealed, &sealed) {
+                (None, None) => false,
+                (Some(a), Some(b)) => a.key() != b.key(),
+                _ => true,
+            }) {
+            self.shared.history_events.lock().unwrap().forget(room);
+            return Err(Error::State("channel sealing mode or key does not match"));
+        }
+        rooms.insert(
             room,
             RoomState {
                 topic,
+                sealed,
                 scope,
                 label,
                 peers: BTreeSet::new(),
                 joined: false,
+                history_enabled: false,
+                history_request: None,
+                history_generation: Arc::new(AtomicU64::new(0)),
                 offering: BTreeSet::new(),
                 author,
             },
         );
-        self.push(Cmd::RoomJoin {
-            room,
-            topic,
-            bootstrap,
-        })?;
+        drop(rooms);
+        if let Err(error) = self.push(Cmd::RoomJoin { room, topic, bootstrap }) {
+            self.shared.rooms.write().unwrap().remove(&room);
+            self.shared.history_events.lock().unwrap().forget(room);
+            return Err(error);
+        }
         Ok(room)
     }
 
@@ -1044,7 +1449,30 @@ impl Node {
         let key = data_encoding::HEXLOWER.encode(&friends::random::<32>());
         let topic = crate::topic::derive(&self.shared.app_id, Scope::Custom, &key);
         let label = if label.is_empty() { "channel" } else { label };
-        self.join(Scope::Custom, topic, Vec::new(), label.to_string(), None)
+        self.join(Scope::Custom, topic, Vec::new(), label.to_string(), None, None)
+    }
+
+    /// Create a sealed channel with a fresh random topic and symmetric key.
+    pub fn channel_create_sealed(&self, label: &str) -> Result<RoomHandle> {
+        self.check_open()?;
+        let ticket = SealedRoomTicket::new(label, Vec::new())?;
+        self.join(Scope::Custom, ticket.topic, Vec::new(), ticket.label.clone(), None, Some(ticket))
+    }
+
+    pub fn room_is_sealed(&self, room: RoomHandle) -> Result<bool> {
+        self.shared.rooms.read().unwrap().get(&room).map(|s| s.sealed.is_some()).ok_or(Error::NotFound)
+    }
+
+    /// Start a fresh channel. The old channel and its tickets remain valid;
+    /// explicit ticket distribution and leaving the old room are caller actions.
+    pub fn channel_reseal(&self, room: RoomHandle) -> Result<RoomHandle> {
+        let label = {
+            let rooms = self.shared.rooms.read().unwrap();
+            let state = rooms.get(&room).ok_or(Error::NotFound)?;
+            if state.sealed.is_none() { return Err(Error::State("not a sealed channel")); }
+            state.label.clone()
+        };
+        self.channel_create_sealed(&label)
     }
 
     /// Remember where a node can be reached (an `ltnode…` ticket), so dialing
@@ -1081,7 +1509,7 @@ impl Node {
             .map(EndpointAddr::from)
             .collect();
         let topic = crate::author::topic(&self.shared.app_id, author);
-        self.join(Scope::Public, topic, peers, "author".to_string(), Some(*author))
+        self.join(Scope::Public, topic, peers, "author".to_string(), Some(*author), None)
     }
 
     /// Publish an announcement signed offline (`ltannounce…`) into an author
@@ -1155,6 +1583,11 @@ impl Node {
     pub fn room_ticket(&self, room: RoomHandle) -> Result<String> {
         let rooms = self.shared.rooms.read().unwrap();
         let state = rooms.get(&room).ok_or(Error::NotFound)?;
+        if let Some(ticket) = &state.sealed {
+            let mut ticket = ticket.clone();
+            ticket.peers = vec![self.shared.endpoint.addr()];
+            return Ok(ticket.to_string());
+        }
         Ok(RoomTicket::new(
             state.topic,
             state.scope,
@@ -1184,6 +1617,65 @@ impl Node {
             room,
             frame: Frame::App(data.to_vec()),
         })
+    }
+
+    /// Queue text for signed history capture and normal live delivery.
+    /// Signing and database work run on the worker, never the caller's frame thread.
+    /// Metadata opt-in selects original signed events; catch-up is separately configured.
+    pub fn room_send_with_history(&self, room: RoomHandle, text: &str) -> Result<()> {
+        if !crate::channel_history::valid_text(text) {
+            return Err(Error::Arg("invalid history text"));
+        }
+        match self.shared.rooms.read().unwrap().get(&room) {
+            None => return Err(Error::NotFound),
+            Some(s) if s.author.is_some() => return Err(Error::State("author channels do not carry chat history")),
+            Some(_) => {}
+        }
+        self.push(Cmd::HistoryPublish { room, text: text.to_owned() })
+    }
+
+    /// Opt into signed metadata events, independently of automatic catch-up.
+    /// New bindings call this before joining rooms; old clients keep Message.
+    pub fn channel_record_events_enable(&self, enabled: bool) -> Result<()> {
+        self.check_open()?;
+        self.shared.history_metadata.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Enable automatic catch-up requests and bounded snapshot serving for a room.
+    /// No historical live-message events are generated. Disabled by default.
+    pub fn room_history_enable(&self, room: RoomHandle, enabled: bool) -> Result<()> {
+        match self.shared.rooms.read().unwrap().get(&room) {
+            None => return Err(Error::NotFound),
+            Some(s) if s.author.is_some() => return Err(Error::State("author channels do not carry chat history")),
+            Some(_) => {}
+        }
+        self.shared.history_metadata.store(true, Ordering::Relaxed);
+        self.push(Cmd::HistoryEnable { room, enabled })
+    }
+
+    /// Clear only this channel's local history and cancel its pending catch-up.
+    /// Other members retain their copies; a later catch-up can restore them.
+    pub fn room_history_clear(&self, room: RoomHandle) -> Result<()> {
+        if !self.shared.rooms.read().unwrap().contains_key(&room) { return Err(Error::NotFound); }
+        self.push(Cmd::HistoryClear(room))
+    }
+
+    /// Queue a bounded, reverified snapshot fetch and store its signed records.
+    /// Historical event/UI delivery and automatic requests are separate work.
+    pub fn room_history_fetch(&self, room: RoomHandle, provider: &PeerId, hash: [u8; 32], size: u64) -> Result<()> {
+        let maximum = if self.room_is_sealed(room)? { crate::channel_history::MAX_SEALED_SNAPSHOT_BYTES } else { crate::channel_history::MAX_SNAPSHOT_BYTES };
+        if size < crate::channel_history::SNAPSHOT_HEADER as u64 || size > maximum as u64 {
+            return Err(Error::Arg("invalid history snapshot size"));
+        }
+        let provider = EndpointId::from_bytes(provider).map_err(|_| Error::Arg("invalid history provider"))?;
+        if self.shared.is_blocked(&provider) { return Err(Error::State("history provider is blocked")); }
+        match self.shared.rooms.read().unwrap().get(&room) {
+            None => return Err(Error::NotFound),
+            Some(s) if s.author.is_some() => return Err(Error::State("author channels do not carry chat history")),
+            Some(_) => {}
+        }
+        self.push(Cmd::HistoryFetch { room, provider, hash, size })
     }
 
     pub fn presence_set(&self, room: RoomHandle, data: &[u8]) -> Result<()> {
@@ -1238,16 +1730,40 @@ impl Node {
         self.shared.blobs.write().unwrap().insert(
             blob,
             BlobState {
+                sealed: None,
                 hash: None,
                 name: name.to_string(),
                 size: data.len() as u64,
                 from: None,
+                room: None,
             },
         );
         self.push(Cmd::BlobAddBytes {
             blob,
             data: data.to_vec(),
         })?;
+        Ok(blob)
+    }
+
+    /// Prepare encrypted bytes for this sealed channel only. Signing/encryption
+    /// and blob-store work run on the worker; no plaintext blob is imported.
+    pub fn blob_add_sealed_bytes(&self, room: RoomHandle, data: &[u8], name: &str) -> Result<BlobHandle> {
+        self.check_open()?;
+        if data.len() as u64 > crate::bounded_blob::MAX_FILE_BYTES { return Err(Error::TooLarge); }
+        if name.is_empty() || name.len() > 1024 || name.chars().any(char::is_control) {
+            return Err(Error::Arg("invalid shared file name"));
+        }
+        let ticket = self.shared.rooms.read().unwrap().get(&room).ok_or(Error::NotFound)?
+            .sealed.clone().ok_or(Error::State("not a sealed channel"))?;
+        let blob = self.shared.handle();
+        self.shared.blobs.write().unwrap().insert(blob, BlobState {
+            sealed: Some(SealedFile { ticket: ticket.clone(), encrypted_size: 0 }),
+            hash: None, name: name.into(), size: data.len() as u64, from: None, room: Some(room),
+        });
+        if let Err(error) = self.push(Cmd::BlobAddSealedBytes { blob, data: data.to_vec(), ticket }) {
+            self.shared.blobs.write().unwrap().remove(&blob);
+            return Err(error);
+        }
         Ok(blob)
     }
 
@@ -1260,10 +1776,12 @@ impl Node {
         self.shared.blobs.write().unwrap().insert(
             blob,
             BlobState {
+                sealed: None,
                 hash: None,
                 name: name.to_string(),
                 size: 0,
                 from: None,
+                room: None,
             },
         );
         self.push(Cmd::BlobAddFile {
@@ -1276,21 +1794,27 @@ impl Node {
     /// Announce a blob to a room. This is the moment something becomes visible
     /// to other people, and the only one.
     pub fn blob_offer(&self, room: RoomHandle, blob: BlobHandle) -> Result<()> {
-        let (hash, size, name) = {
+        let (hash, size, name, sealed_file, from) = {
             let blobs = self.shared.blobs.read().unwrap();
             let state = blobs.get(&blob).ok_or(Error::NotFound)?;
             let hash = state.hash.ok_or(Error::State("blob is still hashing"))?;
-            (hash, state.size, state.name.clone())
+            (hash, state.size, state.name.clone(), state.sealed.clone(), state.from)
         };
-        {
+        let frame = {
             let mut rooms = self.shared.rooms.write().unwrap();
             let state = rooms.get_mut(&room).ok_or(Error::NotFound)?;
+            let frame = match (&state.sealed, sealed_file) {
+                (Some(ticket), Some(file)) if from.is_none() && file.ticket.topic == ticket.topic
+                    && file.ticket.key() == ticket.key() => Frame::SealedBlobOffer {
+                        hash, size, encrypted_size: file.encrypted_size, name,
+                    },
+                (None, None) => Frame::BlobOffer { hash, size, name },
+                _ => return Err(Error::State("shared file encryption does not match channel")),
+            };
             state.offering.insert(hash);
-        }
-        self.push(Cmd::RoomBroadcast {
-            room,
-            frame: Frame::BlobOffer { hash, size, name },
-        })?;
+            frame
+        };
+        self.push(Cmd::RoomBroadcast { room, frame })?;
         self.shared.emit(Event::Publishing {
             room,
             publishing: true,
@@ -1299,16 +1823,20 @@ impl Node {
     }
 
     pub fn blob_unoffer(&self, room: RoomHandle, blob: BlobHandle) -> Result<()> {
-        let hash = {
+        let (hash, sealed_file) = {
             let blobs = self.shared.blobs.read().unwrap();
-            blobs
-                .get(&blob)
-                .and_then(|s| s.hash)
-                .ok_or(Error::NotFound)?
+            let state = blobs.get(&blob).ok_or(Error::NotFound)?;
+            (state.hash.ok_or(Error::NotFound)?, state.sealed.clone())
         };
         let still_publishing = {
             let mut rooms = self.shared.rooms.write().unwrap();
             let state = rooms.get_mut(&room).ok_or(Error::NotFound)?;
+            if let Some(file) = &sealed_file {
+                if !state.sealed.as_ref().is_some_and(|ticket|
+                    file.ticket.topic == ticket.topic && file.ticket.key() == ticket.key()) {
+                    return Err(Error::State("shared file encryption does not match channel"));
+                }
+            }
             state.offering.remove(&hash);
             !state.offering.is_empty()
         };
@@ -1330,6 +1858,7 @@ impl Node {
         let (hash, from) = {
             let blobs = self.shared.blobs.read().unwrap();
             let state = blobs.get(&blob).ok_or(Error::NotFound)?;
+            if state.sealed.is_some() { return Err(Error::State("sealed files require bounded authenticated fetch")); }
             (
                 state.hash.ok_or(Error::State("blob has no hash yet"))?,
                 state.from,
@@ -1349,6 +1878,46 @@ impl Node {
             .get(&blob)
             .and_then(|s| s.hash)
             .ok_or(Error::State("blob has no hash yet"))
+    }
+
+    /// Explicit opt-in file fetch: at most two queued/running jobs, 16 MiB each,
+    /// exact offered/Bao tree size, verified content and a create-new destination.
+    /// No ordinary blob-cache download or export. Caller must protect the parent
+    /// directory and recheck room/mute admission before calling.
+    pub fn blob_fetch_bounded(&self, blob: BlobHandle, out_path: &str) -> Result<()> {
+        self.check_open()?;
+        if out_path.is_empty() { return Err(Error::Arg("fetch needs a destination path")); }
+        // Keep offer admission and block state stable through job registration.
+        // Withdrawal/unfriend can then remove the offer and signal this job;
+        // neither can miss a fetch that read metadata just before removal.
+        let blocked = self.shared.blocked.read().unwrap();
+        let blobs = self.shared.blobs.read().unwrap();
+        let state = blobs.get(&blob).ok_or(Error::NotFound)?;
+        let hash = state.hash.ok_or(Error::State("blob has no hash yet"))?;
+        let from = state.from.ok_or(Error::State("bounded fetch needs a remote offer"))?;
+        let size = state.size;
+        let sealed = state.sealed.clone();
+        if size > crate::bounded_blob::MAX_FILE_BYTES { return Err(Error::Arg("file offer exceeds download bounds")); }
+        if blocked.contains(&from) { return Err(Error::State("file sender is blocked")); }
+        let permit = self.shared.file_downloads.clone().try_acquire_owned().map_err(|_| Error::Full)?;
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        {
+            let mut jobs = self.shared.file_jobs.lock().unwrap();
+            if jobs.contains_key(&blob) { return Err(Error::State("file download already pending")); }
+            jobs.insert(blob, (from, cancel));
+        }
+        drop(blobs);
+        drop(blocked);
+        let job = FileJob { shared: self.shared.clone(), blob, cancel: receiver };
+        self.push(Cmd::BlobFetchBounded { blob, hash, from, size, sealed, out: PathBuf::from(out_path), permit, job })
+    }
+
+    /// Request cancellation; the terminal event determines the outcome if completion races it.
+    pub fn blob_cancel_bounded(&self, blob: BlobHandle) -> Result<()> {
+        self.check_open()?;
+        let jobs = self.shared.file_jobs.lock().unwrap();
+        let (_, cancel) = jobs.get(&blob).ok_or(Error::NotFound)?;
+        cancel.send(true).map_err(|_| Error::State("file download already finished"))
     }
 
     // -------------------------------------------------------------- bookmarks
@@ -1486,6 +2055,553 @@ pub(crate) fn json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_file_offers_are_bounded_before_handle_allocation() {
+        let peer = SecretKey::generate().public();
+        let other = SecretKey::generate().public();
+        let mut blobs = HashMap::new();
+        assert!(!remote_offer_allowed(&blobs, 1, peer, [1; 32], "bad\nname"));
+        for i in 0..8u8 {
+            let hash = [i; 32];
+            assert!(remote_offer_allowed(&blobs, 1, peer, hash, "clear.png"));
+            blobs.insert(i as u64, BlobState { sealed: None, hash: Some(hash), name: "clear.png".into(),
+                size: 10, from: Some(peer), room: Some(1) });
+            assert!(!remote_offer_allowed(&blobs, 1, peer, hash, "clear.png"));
+        }
+        assert!(!remote_offer_allowed(&blobs, 2, peer, [99; 32], "clear.png"));
+        assert!(remote_offer_allowed(&blobs, 1, other, [0; 32], "clear.png"));
+        for i in 8..128u64 {
+            let sender = SecretKey::generate().public();
+            blobs.insert(i, BlobState { sealed: None, hash: Some([0; 32]), name: "clear.png".into(),
+                size: 10, from: Some(sender), room: Some(1) });
+        }
+        assert!(!remote_offer_allowed(&blobs, 1, other, [99; 32], "clear.png"));
+    }
+
+    #[test]
+    fn bounded_file_job_cancellation_survives_queueing_and_drop_unregisters() {
+        let node = Node::open(Config { relay: RelayMode::Disabled,
+            app_id: "file-cancel-test/1".into(), ..Config::default() }).unwrap();
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        node.shared.file_jobs.lock().unwrap().insert(123, (node.shared.endpoint.id(), sender));
+        let job = FileJob { shared: node.shared.clone(), blob: 123, cancel: receiver };
+        node.blob_cancel_bounded(123).unwrap();
+        assert!(*job.cancel.borrow(), "queued worker observes cancellation immediately");
+        drop(job);
+        assert!(node.shared.file_jobs.lock().unwrap().is_empty());
+        assert_eq!(node.blob_cancel_bounded(123), Err(Error::NotFound));
+        node.close();
+    }
+
+    #[test]
+    fn forgetting_remote_offers_cancels_registered_jobs_and_preserves_local_blobs() {
+        let node = Node::open(Config { relay: RelayMode::Disabled,
+            app_id: "file-forget-test/1".into(), ..Config::default() }).unwrap();
+        let peer = SecretKey::generate().public();
+        let other = SecretKey::generate().public();
+        let state = |from, room| BlobState { sealed: None, hash: Some([1; 32]), name: "clear.png".into(), size: 10, from, room };
+        {
+            let mut blobs = node.shared.blobs.write().unwrap();
+            blobs.insert(123, state(Some(peer), Some(0)));
+            blobs.insert(124, state(None, None));
+            blobs.insert(125, state(Some(other), Some(0)));
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        node.shared.file_jobs.lock().unwrap().insert(123, (peer, sender));
+        let job = FileJob { shared: node.shared.clone(), blob: 123, cancel: receiver };
+        node.shared.forget_remote_blobs(|s| s.from == Some(peer));
+        assert!(*job.cancel.borrow());
+        let blobs = node.shared.blobs.read().unwrap();
+        assert!(!blobs.contains_key(&123));
+        assert!(blobs.contains_key(&124));
+        assert!(blobs.contains_key(&125));
+        drop(blobs);
+        assert!(node.poll(64).iter().any(|e| matches!(e, Event::BlobWithdrawn { blob: 123 })));
+        drop(job);
+        node.close();
+    }
+
+    #[tokio::test]
+    async fn bounded_partial_file_closes_and_is_removed_when_task_is_aborted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.download");
+        let file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await.unwrap();
+        let partial = PartialFile { path: path.clone(), keep: false, file: Some(file) };
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _partial = partial;
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        assert!(path.exists());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn repeated_text_has_two_signed_records_and_two_live_messages() {
+        use std::time::{Duration, Instant};
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let nodes: Vec<_> = dirs.iter().map(|dir| Node::open(Config {
+            db_path: Some(dir.path().join("history.sqlite")),
+            blob_dir: Some(dir.path().join("blobs")),
+            relay: RelayMode::Disabled,
+            app_id: "history-capture-test".into(),
+            ..Config::default()
+        }).unwrap()).collect();
+        let ready_deadline = Instant::now() + Duration::from_secs(15);
+        let mut ready = [false; 2];
+        while !ready.iter().all(|v| *v) {
+            assert!(Instant::now() < ready_deadline, "nodes did not become ready");
+            for (i, node) in nodes.iter().enumerate() {
+                if node.poll(64).iter().any(|e| matches!(e, Event::Ready { .. })) { ready[i] = true; }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let room_a = nodes[0].channel_create("test").unwrap();
+        let join_deadline = Instant::now() + Duration::from_secs(15);
+        while !nodes[0].poll(64).iter().any(|e| matches!(e, Event::RoomJoined { .. })) {
+            assert!(Instant::now() < join_deadline, "room did not join");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let ticket = nodes[0].room_ticket(room_a).unwrap();
+        let room_b = nodes[1].room_join(Scope::Custom, "", Some(&ticket)).unwrap();
+        let topic = nodes[0].shared.rooms.read().unwrap()[&room_a].topic;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut joined = [false; 2];
+        while !joined.iter().all(|v| *v) {
+            assert!(Instant::now() < deadline, "peers did not connect");
+            for (i, node) in nodes.iter().enumerate() {
+                for event in node.poll(64) {
+                    if matches!(event, Event::PeerJoined { .. }) { joined[i] = true; }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(nodes[0].room_send_with_history(room_a, "bad\0text").is_err());
+        for _ in 0..2 { nodes[0].room_send_with_history(room_a, "same text").unwrap(); }
+        let mut live = 0;
+        loop {
+            assert!(Instant::now() < deadline, "history did not arrive");
+            for event in nodes[1].poll(64) {
+                if let Event::Message { room, peer, data } = event {
+                    assert_eq!(room, room_b);
+                    assert_eq!(peer, *nodes[0].shared.secret.public().as_bytes());
+                    assert_eq!(data, b"same text");
+                    live += 1;
+                }
+            }
+            let records = nodes[1].shared.store.lock().unwrap()
+                .channel_history_read(topic.as_bytes(), crate::store::now_ms()).unwrap();
+            if records.len() == 2 && live == 2 {
+                assert_ne!(records[0].signature(), records[1].signature());
+                let originals = nodes[0].shared.store.lock().unwrap()
+                    .channel_history_read(topic.as_bytes(), crate::store::now_ms()).unwrap();
+                assert_eq!(originals.len(), 2);
+                for record in &records {
+                    assert_eq!(record.author(), nodes[0].shared.secret.public());
+                    assert!(originals.iter().any(|r| r.encoded() == record.encoded()));
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // History envelopes do not generate a second live event.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!nodes[1].poll(64).iter().any(|e| matches!(e, Event::Message { .. })));
+        for node in &nodes { node.close(); }
+    }
+
+    #[test]
+    fn snapshot_fetch_is_bounded_reverified_and_keeps_original_author() {
+        use crate::channel_history::{self, network::fetch_snapshot};
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let nodes: Vec<_> = dirs.iter().map(|dir| Node::open(Config {
+            db_path: Some(dir.path().join("fetch.sqlite")),
+            blob_dir: Some(dir.path().join("blobs")),
+            relay: RelayMode::Disabled,
+            app_id: "history-fetch-test".into(),
+            ..Config::default()
+        }).unwrap()).collect();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut ready = [false; 2];
+        while !ready.iter().all(|v| *v) {
+            assert!(Instant::now() < deadline, "nodes did not become ready");
+            for (i, node) in nodes.iter().enumerate() {
+                if node.poll(64).iter().any(|e| matches!(e, Event::Ready { .. })) { ready[i] = true; }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        nodes[1].add_address_hint(&nodes[0].node_ticket()).unwrap();
+        let original_author = SecretKey::generate(); // Publisher never has this author's key.
+        let room_handle = nodes[1].channel_create("snapshot-fetch").unwrap();
+        let room = *nodes[1].shared.rooms.read().unwrap()[&room_handle].topic.as_bytes();
+        let original = channel_history::sign(&original_author, room, 42, "signed by someone else").unwrap();
+        let snapshot = channel_history::snapshot(room, &[original.clone()]).unwrap();
+        let added = nodes[0].blob_add_bytes(&snapshot, "history-test").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let hash = loop {
+            assert!(Instant::now() < deadline, "snapshot was not added");
+            if nodes[0].poll(64).iter().any(|e| matches!(e, Event::BlobDone { blob, .. } if *blob == added)) {
+                break nodes[0].shared.blobs.read().unwrap()[&added].hash.unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let endpoint = &nodes[1].shared.endpoint;
+        let provider = nodes[0].shared.secret.public();
+        let run = |size, room: &[u8; 32]| nodes[1].rt.as_ref().unwrap().block_on(fetch_snapshot(endpoint, &nodes[1].shared.history_downloads, provider, hash, size, room));
+        let occupied: Vec<_> = (0..4).map(|_| nodes[1].shared.history_downloads.try_acquire().unwrap()).collect();
+        assert!(run(snapshot.len() as u64, &room).is_err(), "busy node must refuse extra fetches");
+        drop(occupied);
+        let records = run(snapshot.len() as u64, &room).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].encoded(), original);
+        assert_eq!(records[0].author(), original_author.public());
+        assert_ne!(records[0].author(), provider);
+        assert!(run(snapshot.len() as u64 + 1, &room).is_err());
+        assert!(run(snapshot.len() as u64, &[18; 32]).is_err());
+        assert!(run(channel_history::MAX_SNAPSHOT_BYTES as u64 + 1, &room).is_err());
+        assert!(run(0, &room).is_err());
+        assert!(nodes[1].room_history_fetch(0, provider.as_bytes(), hash, snapshot.len() as u64).is_err());
+        assert!(nodes[1].room_history_fetch(room_handle, provider.as_bytes(), hash, 0).is_err());
+        nodes[1].room_history_fetch(room_handle, provider.as_bytes(), hash, snapshot.len() as u64).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "queued snapshot was not stored");
+            assert!(nodes[1].poll(64).iter().all(|e| !matches!(e, Event::Message { .. })));
+            let stored = nodes[1].shared.store.lock().unwrap().channel_history_read(&room, crate::store::now_ms()).unwrap();
+            if !stored.is_empty() {
+                assert_eq!(stored.len(), 1);
+                assert_eq!(stored[0].encoded(), original);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // An oversized real blob cannot bypass the limit with a small offer.
+        let oversized = vec![0; channel_history::MAX_SNAPSHOT_BYTES + 1];
+        let added = nodes[0].blob_add_bytes(&oversized, "oversized-history-test").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let big_hash = loop {
+            assert!(Instant::now() < deadline, "oversized fixture was not added");
+            if nodes[0].poll(64).iter().any(|e| matches!(e, Event::BlobDone { blob, .. } if *blob == added)) {
+                break nodes[0].shared.blobs.read().unwrap()[&added].hash.unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(nodes[1].rt.as_ref().unwrap().block_on(fetch_snapshot(endpoint, &nodes[1].shared.history_downloads, provider, big_hash, snapshot.len() as u64, &room)).is_err());
+        // A genuine content hash does not make a forged author signature valid.
+        let mut forged = snapshot.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        let added = nodes[0].blob_add_bytes(&forged, "forged-history-test").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let forged_hash = loop {
+            assert!(Instant::now() < deadline, "forged fixture was not added");
+            if nodes[0].poll(64).iter().any(|e| matches!(e, Event::BlobDone { blob, .. } if *blob == added)) {
+                break nodes[0].shared.blobs.read().unwrap()[&added].hash.unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let records = nodes[1].rt.as_ref().unwrap().block_on(fetch_snapshot(endpoint, &nodes[1].shared.history_downloads, provider, forged_hash, forged.len() as u64, &room)).unwrap();
+        assert!(records.is_empty());
+        // Real loopback transport of a ciphertext snapshot. The normal Bao
+        // blob hash authenticates transferred bytes; the sealed codec then
+        // authenticates provider, channel and each original author's record.
+        let sealed_ticket = crate::ticket::SealedRoomTicket::new("private history", vec![]).unwrap();
+        let sealed_room = *sealed_ticket.topic.as_bytes();
+        let sealed_original = channel_history::sign(&original_author, sealed_room, 42, "encrypted catch-up").unwrap();
+        let sealed_bytes = channel_history::sealed_snapshot(&nodes[0].shared.secret,
+            &sealed_ticket, &[sealed_original.clone()]).unwrap();
+        let added = nodes[0].blob_add_bytes(&sealed_bytes, "sealed-history-test").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let sealed_hash = loop {
+            assert!(Instant::now() < deadline, "sealed fixture was not added");
+            if nodes[0].poll(64).iter().any(|e| matches!(e, Event::BlobDone { blob, .. } if *blob == added)) {
+                break nodes[0].shared.blobs.read().unwrap()[&added].hash.unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let sealed_run = |hash, size, ticket: &crate::ticket::SealedRoomTicket| {
+            nodes[1].rt.as_ref().unwrap().block_on(channel_history::network::fetch_snapshot_over(
+                endpoint, &nodes[1].shared.history_downloads, provider, hash, size,
+                &sealed_room, iroh_blobs::ALPN, Some(ticket)))
+        };
+        let fetched = sealed_run(sealed_hash, sealed_bytes.len() as u64, &sealed_ticket).unwrap();
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].encoded(), sealed_original);
+        assert_eq!(fetched[0].author(), original_author.public());
+        assert!(sealed_run(sealed_hash, sealed_bytes.len() as u64 + 1, &sealed_ticket).is_err());
+        assert!(sealed_run(sealed_hash, channel_history::MAX_SEALED_SNAPSHOT_BYTES as u64 + 1, &sealed_ticket).is_err());
+        let mut wrong_key = crate::ticket::SealedRoomTicket::new("wrong key", vec![]).unwrap();
+        wrong_key.topic = sealed_ticket.topic;
+        assert!(sealed_run(sealed_hash, sealed_bytes.len() as u64, &wrong_key).is_err());
+        assert!(sealed_run(hash, snapshot.len() as u64, &sealed_ticket).is_err(), "plaintext is not a sealed snapshot");
+        assert!(nodes[1].rt.as_ref().unwrap().block_on(fetch_snapshot(endpoint,
+            &nodes[1].shared.history_downloads, provider, sealed_hash,
+            sealed_bytes.len() as u64, &sealed_room)).is_err(), "plain path refuses ciphertext");
+        nodes[1].shared.store.lock().unwrap().channel_history_clear(&room).unwrap();
+        nodes[1].block(original_author.public().as_bytes()).unwrap();
+        nodes[1].room_history_fetch(room_handle, provider.as_bytes(), hash, snapshot.len() as u64).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "blocked-author fetch did not finish");
+            let events = nodes[1].poll(64);
+            assert!(events.iter().all(|e| !matches!(e, Event::Message { .. })));
+            if events.iter().any(|e| matches!(e, Event::Log { message } if message == "channel history fetched: 0 new verified records")) { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(nodes[1].shared.store.lock().unwrap().channel_history_read(&room, crate::store::now_ms()).unwrap().is_empty());
+        nodes[1].block(provider.as_bytes()).unwrap();
+        assert!(nodes[1].room_history_fetch(room_handle, provider.as_bytes(), hash, snapshot.len() as u64).is_err());
+        assert!(nodes[1].poll(64).iter().all(|e| !matches!(e, Event::Message { .. })), "fetching history must not replay live chat");
+        for node in &nodes { node.close(); }
+    }
+
+    #[test]
+    fn automatic_catch_up_uses_another_member_after_author_leaves_and_on_rejoin() {
+        let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let nodes: Vec<_> = dirs.iter().map(|dir| Node::open(Config {
+            db_path: Some(dir.path().join("automatic-history.sqlite")),
+            blob_dir: Some(dir.path().join("blobs")),
+            relay: RelayMode::Disabled,
+            app_id: "automatic-history-test".into(),
+            ..Config::default()
+        }).unwrap()).collect();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut ready = [false; 3];
+        while !ready.iter().all(|v| *v) {
+            assert!(Instant::now() < deadline, "nodes not ready");
+            for (i, node) in nodes.iter().enumerate() {
+                if node.poll(64).iter().any(|e| matches!(e, Event::Ready { .. })) { ready[i] = true; }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let room_a = nodes[0].channel_create("automatic").unwrap();
+        while !nodes[0].poll(64).iter().any(|e| matches!(e, Event::RoomJoined { .. })) {
+            assert!(Instant::now() < deadline, "first room did not join");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let original_ticket = nodes[0].room_ticket(room_a).unwrap();
+        let topic = nodes[0].shared.rooms.read().unwrap()[&room_a].topic;
+        let room_b = nodes[1].room_join(Scope::Custom, "", Some(&nodes[0].room_ticket(room_a).unwrap())).unwrap();
+        nodes[1].room_history_enable(room_b, true).unwrap();
+        let mut connected = [false; 2];
+        while !connected.iter().all(|v| *v) {
+            assert!(Instant::now() < deadline, "first peers did not connect");
+            for i in 0..2 {
+                if nodes[i].poll(64).iter().any(|e| matches!(e, Event::PeerJoined { .. })) { connected[i] = true; }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..2 { nodes[0].room_send_with_history(room_a, "repeated original").unwrap(); }
+        let read = |i: usize| nodes[i].shared.store.lock().unwrap().channel_history_read(topic.as_bytes(), crate::store::now_ms()).unwrap();
+        while read(1).len() != 2 {
+            assert!(Instant::now() < deadline, "member did not retain originals");
+            nodes[1].poll(64);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let originals = read(1);
+        let author = nodes[0].shared.secret.public();
+        nodes[0].close();
+        let ticket_b = nodes[1].room_ticket(room_b).unwrap();
+        let room_c = nodes[2].room_join(Scope::Custom, "", Some(&ticket_b)).unwrap();
+        nodes[2].room_history_enable(room_c, true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut catchup_events = Vec::new();
+        loop {
+            assert!(Instant::now() < deadline, "late join did not catch up");
+            for event in nodes[2].poll(64) {
+                match event {
+                    Event::ChannelRecord { room, peer, encoded, historical } => {
+                        assert_eq!(room, room_c);
+                        assert_eq!(peer, *author.as_bytes());
+                        assert!(historical);
+                        catchup_events.push(encoded);
+                    }
+                    Event::Message { .. } => panic!("backlog replayed as live text"),
+                    _ => {},
+                }
+            }
+            if read(2).len() == 2 && catchup_events.len() == 2 { break; }
+            nodes[1].poll(64);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for original in &originals { assert!(catchup_events.iter().any(|bytes| bytes == original.encoded())); }
+        for record in read(2) {
+            assert_eq!(record.author(), author);
+            assert!(originals.iter().any(|r| r.encoded() == record.encoded()));
+        }
+        while history::known_providers(&nodes[2].shared, &topic).is_empty() {
+            assert!(Instant::now() < deadline, "authenticated provider was not remembered");
+            nodes[2].poll(64);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        nodes[2].room_leave(room_c).unwrap();
+        while !nodes[2].poll(64).iter().any(|e| matches!(e, Event::RoomLeft { room } if *room == room_c)) {
+            assert!(Instant::now() < deadline, "room did not leave");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        nodes[1].room_send_with_history(room_b, "while you were gone").unwrap();
+        while read(1).len() != 3 {
+            assert!(Instant::now() < deadline, "offline message was not stored");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        nodes[2].close();
+        let reopened = Node::open(Config {
+            db_path: Some(dirs[2].path().join("automatic-history.sqlite")),
+            blob_dir: Some(dirs[2].path().join("reopened-blobs")),
+            relay: RelayMode::Disabled,
+            app_id: "automatic-history-test".into(),
+            ..Config::default()
+        }).unwrap();
+        assert_eq!(reopened.shared.secret.public(), nodes[2].shared.secret.public());
+        let room_c = reopened.room_join(Scope::Custom, "", Some(&original_ticket)).unwrap();
+        reopened.room_history_enable(room_c, true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut restored_events = HashSet::new();
+        while read(2).len() != 3 || restored_events.len() != 3 {
+            assert!(Instant::now() < deadline, "rejoin did not catch up");
+            for event in reopened.poll(64) {
+                match event {
+                    Event::Message { .. } | Event::ChannelRecord { historical: false, .. } => panic!("rejoin replayed live text"),
+                    Event::ChannelRecord { encoded, room, .. } => { assert_eq!(room, room_c); restored_events.insert(encoded); },
+                    _ => {},
+                }
+            }
+            nodes[1].poll(64);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(read(2).iter().any(|r| r.text() == "while you were gone" && r.author() == nodes[1].shared.secret.public()));
+        assert!(reopened.poll(64).iter().all(|e| !matches!(e, Event::Message { .. } | Event::ChannelRecord { historical: false, .. })));
+        for record in read(2) { assert!(restored_events.contains(record.encoded())); }
+        reopened.close();
+        for node in &nodes { node.close(); }
+    }
+
+    #[test]
+    fn blocking_an_author_purges_pending_live_and_historical_metadata() {
+        let node = Node::open(Config { relay: RelayMode::Disabled, ..Config::default() }).unwrap();
+        let room = node.channel_create("pending-block").unwrap();
+        node.channel_record_events_enable(true).unwrap();
+        let topic = node.shared.rooms.read().unwrap()[&room].topic;
+        let author = SecretKey::generate();
+        let original = crate::channel_history::sign(&author, *topic.as_bytes(), 1, "blocked fixture").unwrap();
+        let record = crate::channel_history::verify(topic.as_bytes(), &original).unwrap();
+        assert!(history::emit(&node.shared, room, &record, false));
+        let other_room = node.channel_create("unrelated-clear").unwrap();
+        node.shared.emit(Event::ChannelHistoryCleared { room: other_room });
+        let second = crate::channel_history::sign(&author, *topic.as_bytes(), 2, "historical fixture").unwrap();
+        let record2 = crate::channel_history::verify(topic.as_bytes(), &second).unwrap();
+        assert!(history::emit(&node.shared, room, &record2, true));
+        let revision = node.shared.history_revision.load(Ordering::Relaxed);
+        let snapshot = crate::channel_history::snapshot(*topic.as_bytes(), &[original.clone(), second]).unwrap();
+        let hash = *blake3::hash(&snapshot).as_bytes();
+        assert!(node.shared.history_cache.lock().unwrap().put(room, revision, hash, snapshot));
+        assert!(node.shared.history_cache.lock().unwrap().get(room, revision).is_some());
+        node.block(author.public().as_bytes()).unwrap();
+        let blocked_revision = node.shared.history_revision.load(Ordering::Relaxed);
+        assert_eq!(blocked_revision, revision + 1);
+        assert!(node.shared.history_cache.lock().unwrap().get(room, blocked_revision).is_none());
+        assert!(history::emit(&node.shared, room, &record, true));
+        let events = node.poll(64);
+        assert!(events.iter().all(|event| !matches!(event, Event::ChannelRecord { .. })));
+        assert!(events.iter().any(|event| matches!(event, Event::ChannelHistoryCleared { room: got } if *got == other_room)));
+        node.unblock(author.public().as_bytes()).unwrap();
+        assert_eq!(node.shared.history_revision.load(Ordering::Relaxed), blocked_revision + 1);
+        assert!(history::emit(&node.shared, room, &record, true));
+        assert!(node.poll(64).iter().any(|event| matches!(event, Event::ChannelRecord { peer, .. } if peer == author.public().as_bytes())));
+        node.room_leave(room).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "leave did not finish");
+            if node.poll(64).iter().any(|event| matches!(event, Event::RoomLeft { room: got } if *got == room)) { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(history::emit(&node.shared, room, &record, true));
+        assert!(node.poll(64).iter().all(|event| !matches!(event, Event::ChannelRecord { .. })));
+        node.close();
+    }
+
+    #[test]
+    fn full_saved_backlogs_survive_a_small_general_queue_and_single_event_polls() {
+        let node = Node::open(Config { relay: RelayMode::Disabled, event_queue_cap: 16, ..Config::default() }).unwrap();
+        let rooms = [node.channel_create("pressure-a").unwrap(), node.channel_create("pressure-b").unwrap()];
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut joined = HashSet::new();
+        while joined.len() < 2 {
+            assert!(Instant::now() < deadline);
+            for e in node.poll(64) { if let Event::RoomJoined { room } = e { joined.insert(room); } }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let topics: HashMap<_, _> = rooms.iter().map(|r| (*r, node.shared.rooms.read().unwrap()[r].topic)).collect();
+        for room in rooms {
+            for i in 0..crate::channel_history::MAX_RECORDS {
+                let raw = crate::channel_history::sign(&node.shared.secret, *topics[&room].as_bytes(), i as i64, &format!("saved {i}")).unwrap();
+                assert!(node.shared.store.lock().unwrap().channel_history_insert(topics[&room].as_bytes(), &raw, crate::store::now_ms()).unwrap());
+            }
+            node.room_history_enable(room, true).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut received: HashMap<u64, HashSet<Vec<u8>>> = HashMap::new();
+        while received.values().map(HashSet::len).sum::<usize>() < 512 {
+            assert!(Instant::now() < deadline, "saved records were lost under queue pressure");
+            for e in node.poll(1) {
+                if let Event::ChannelRecord { room, encoded, historical, .. } = e {
+                    assert!(historical);
+                    assert!(crate::channel_history::verify(topics[&room].as_bytes(), &encoded).is_some());
+                    assert!(received.entry(room).or_default().insert(encoded));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for room in rooms { assert_eq!(received[&room].len(), 256); }
+        node.close();
+    }
+
+    #[test]
+    fn signed_events_load_saved_history_and_clear_without_replaying_live_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Node::open(Config { db_path: Some(dir.path().join("saved.sqlite")), relay: RelayMode::Disabled, ..Config::default() }).unwrap();
+        let room = node.channel_create("saved").unwrap();
+        node.room_history_enable(room, true).unwrap();
+        node.room_send_with_history(room, "own signed line").unwrap();
+        let wait = |historical: bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                assert!(Instant::now() < deadline, "signed event did not arrive");
+                for event in node.poll(64) {
+                    assert!(!matches!(event, Event::Message { .. }), "signed mode emitted legacy live text");
+                    if let Event::ChannelRecord { room: got, peer, encoded, historical: kind } = event {
+                        assert_eq!(got, room);
+                        assert_eq!(peer, *node.shared.secret.public().as_bytes());
+                        assert_eq!(kind, historical);
+                        return encoded;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let original = wait(false);
+        node.room_history_enable(room, true).unwrap();
+        assert_eq!(wait(true), original);
+        let generation = node.shared.rooms.read().unwrap()[&room].history_generation.clone();
+        let before_clear = generation.load(Ordering::Relaxed);
+        node.room_history_clear(room).unwrap();
+        let topic = node.shared.rooms.read().unwrap()[&room].topic;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !node.shared.store.lock().unwrap().channel_history_read(topic.as_bytes(), crate::store::now_ms()).unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "local history did not clear");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(node.shared.rooms.read().unwrap()[&room].history_request.is_none());
+        let delayed = crate::channel_history::verify(topic.as_bytes(), &original).unwrap();
+        assert!(history::ingest_snapshot(&node.shared, room, &topic, &generation, before_clear, vec![delayed]).unwrap().is_none());
+        assert!(node.shared.store.lock().unwrap().channel_history_read(topic.as_bytes(), crate::store::now_ms()).unwrap().is_empty());
+        assert!(node.poll(64).iter().all(|e| !matches!(e, Event::Message { .. } | Event::ChannelRecord { .. })));
+        node.close();
+    }
 
     #[test]
     fn json_strings_are_escaped() {

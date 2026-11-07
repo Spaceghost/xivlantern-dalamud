@@ -22,9 +22,13 @@ public sealed class ChannelInfo(ulong room, string label, string ticket)
     public string Label { get; } = label;
     /// <summary>The ticket it was saved under: the key for its conversation and its mute.</summary>
     public string Ticket { get; } = ticket;
+    public bool Sealed { get; } = ticket.StartsWith("ltsealed", StringComparison.Ordinal);
     public string Key => ChatBook.ChannelKey(Ticket);
     public HashSet<string> Members { get; } = [];
 }
+
+/// <summary>A queued offer owned by this session; no local file path is exposed in the row.</summary>
+public sealed record OutgoingFileOffer(ulong Handle, ulong Room, string Key, string Name, ulong Size);
 
 /// <summary>A channel a friend invited us to. Nothing is joined until the player says so.</summary>
 public sealed record ChannelInviteOffer(string FromId, string FromName, string Ticket, string Label);
@@ -54,14 +58,30 @@ public sealed class LanternService : IDisposable
     /// <summary>Opens, closes and throwaway selftests still running. Unload waits for them: no Rust thread may
     /// outlive the plugin's code.</summary>
     private readonly List<Task> background = [];
+    // Only workers/unload take this lock; frame callbacks never wait for preparation.
+    private readonly object nostrWorkGate = new();
+    private readonly object fileStorageGate = new(); // Workers only: serialize cleanup and quota scans.
+    private CancellationTokenSource? nostrPreparation;
+    public bool SupportsNostrInvites => node?.SupportsNostrInvites == true;
+    private readonly NostrOperation nostrOperation = new();
+    public bool NostrBusy => nostrOperation.Busy;
+    public string NostrNpub { get; private set; } = "";
+    public string NostrStatus => nostrOperation.Status;
+    public string NostrResolvedName { get; private set; } = "";
+    public string NostrResolvedKey { get; private set; } = "";
+    public NostrInbox NameCardInbox { get; }
     private DateTime nextFriendRefresh;
     private int generation;
+    private readonly IdleAway idleAway = new();
+    private long nextIdlePoll;
+    public uint EffectivePresence => idleAway.Active ? 2u : config.Presence;
 
     public LanternService(string nativeDir, string configDir, Configuration config, Action save, IPluginLog log, IFramework framework)
     {
         this.nativeDir = nativeDir;
         dbPath = Path.Combine(configDir, "lantern.sqlite");
         this.config = config;
+        NameCardInbox = new NostrInbox(config.NostrIgnoredInvites);
         this.save = save;
         this.log = log;
         this.framework = framework;
@@ -73,6 +93,32 @@ public sealed class LanternService : IDisposable
     public string NodeId { get; private set; } = "";
     public string NodeTicket { get; private set; } = "";
     public ChatBook Book { get; } = new();
+    public FileOffers FileOffers { get; } = new();
+    public bool SupportsSealedChannels => node?.SupportsSealedChannels == true;
+    public bool SupportsFileDownloads => node?.SupportsBoundedFileFetch == true;
+    public bool SupportsFriendFiles => node?.SupportsFriendFiles == true;
+    public string FileDownloadStatus { get; private set; } = "";
+    private readonly HashSet<ulong> queuedFileDownloads = [];
+    public bool FileSendBusy { get; private set; }
+    private volatile bool cacheCloseUncertain;
+    public bool SharedCacheCloseError => cacheCloseUncertain;
+    public bool SharedCacheBusy { get; private set; }
+    public bool CanClearSharedCache
+    {
+        get
+        {
+            if (cacheCloseUncertain || State != ServiceState.Off || node != null || SharedCacheBusy || !onFramework.IsEmpty) return false;
+            lock (background) return background.All(t => t.IsCompleted);
+        }
+    }
+    public string SharedCacheStatus { get; private set; } = "";
+    public string FileSendStatus { get; private set; } = "";
+    private OutgoingFileOffer? filePublication;
+    private readonly List<OutgoingFileOffer> outgoingFiles = [];
+    public IReadOnlyList<OutgoingFileOffer> OutgoingFiles => outgoingFiles;
+    private readonly Dictionary<ulong, bool> earlyFilePublication = [];
+    private ulong sharedFileBytes;
+    private int sharedFileCount;
     public IReadOnlyList<FriendView> Friends { get; private set; } = [];
     public List<ChannelInfo> Channels { get; } = [];
     public List<ChannelInviteOffer> ChannelInvites { get; } = [];
@@ -80,7 +126,10 @@ public sealed class LanternService : IDisposable
     public IReadOnlyList<string> Blocked { get; private set; } = [];
     public ulong? AuthorRoom { get; private set; }
     public string DataPath => dbPath;
+    public bool SupportsChannelHistory => node?.SupportsChannelHistory == true;
     public bool IsOn => State == ServiceState.On && node is not null;
+    public PullCountdown Pull { get; } = new();
+    public event Action<string>? PullCompleted;
 
     /// <summary>The conversation the window is showing, so it is not toasted or counted as unread.</summary>
     public string? OpenConversation { get; set; }
@@ -99,7 +148,7 @@ public sealed class LanternService : IDisposable
 
     public void Start()
     {
-        if (State is ServiceState.Starting or ServiceState.On)
+        if (SharedCacheBusy || State is ServiceState.Starting or ServiceState.On or ServiceState.Stopping)
             return;
         if (!config.PrivacyAcknowledged)
         {
@@ -119,7 +168,7 @@ public sealed class LanternService : IDisposable
                 if (gen != Volatile.Read(ref generation))
                 {
                     // Turned off, or unloading, while it was opening.
-                    opened.Dispose();
+                    ClosePersistentNode(opened);
                     return;
                 }
 
@@ -156,7 +205,7 @@ public sealed class LanternService : IDisposable
         if (gen != generation || State != ServiceState.Starting)
         {
             // Turned off while it was opening.
-            Background(opened.Dispose);
+            Background(() => ClosePersistentNode(opened));
             return;
         }
 
@@ -169,6 +218,7 @@ public sealed class LanternService : IDisposable
             if (config.DisplayName.Trim().Length > 0)
                 node.SetDisplayName(config.DisplayName.Trim());
             node.SetPresence((PresenceStatus)config.Presence, config.PresenceNote);
+            if (node.SupportsActivityTags) node.SetActivityTags(config.ActivityTags);
             if (config.RejoinChannels)
             {
                 foreach (var saved in config.Channels.ToList())
@@ -187,11 +237,31 @@ public sealed class LanternService : IDisposable
         }
     }
 
+    private void ClosePersistentNode(LanternNode closing)
+    {
+        try { lock (nostrWorkGate) closing.Dispose(); }
+        catch { cacheCloseUncertain = true; throw; }
+    }
+
     public void Stop()
     {
+        nostrPreparation?.Cancel();
         generation++;
         var n = node;
         node = null;
+        nostrOperation.Reset();
+        NostrNpub = "";
+        NostrResolvedName = NostrResolvedKey = "";
+        NameCardInbox.ClearPending();
+        FileOffers.Clear();
+        queuedFileDownloads.Clear();
+        FileSendBusy = false;
+        FileSendStatus = FileDownloadStatus = "";
+        filePublication = null;
+        outgoingFiles.Clear();
+        earlyFilePublication.Clear();
+        sharedFileBytes = 0;
+        sharedFileCount = 0;
         Channels.Clear();
         AuthorRoom = null;
         Friends = [];
@@ -207,7 +277,7 @@ public sealed class LanternService : IDisposable
         {
             try
             {
-                n.Dispose();
+                ClosePersistentNode(n);
             }
             catch (Exception ex)
             {
@@ -237,6 +307,7 @@ public sealed class LanternService : IDisposable
 
     public void Dispose()
     {
+        nostrPreparation?.Cancel();
         framework.Update -= OnUpdate;
         Interlocked.Increment(ref generation);
         Task[] pending;
@@ -258,7 +329,9 @@ public sealed class LanternService : IDisposable
         // no Rust thread may outlive it. The native library itself stays loaded (see Native.Load).
         try
         {
-            n?.Dispose();
+            if (n != null) ClosePersistentNode(n);
+            nostrPreparation?.Dispose();
+            nostrPreparation = null;
         }
         catch (Exception ex)
         {
@@ -283,9 +356,26 @@ public sealed class LanternService : IDisposable
         }
 
         if (node is null)
+        {
+            Pull.Clear();
+            idleAway.Tick(false, false, config.Presence, config.PresenceNote, null, 1, (_, _) => false);
             return;
+        }
         try
         {
+            var now = Environment.TickCount64;
+            ForgetFileOffers(offer => !FileAllowed(offer));
+            if (!config.PullTimersEnabled || config.Muted.Contains(Pull.Channel) || !Channels.Any(c => c.Key == Pull.Channel))
+                Pull.Clear();
+            else if (Pull.Advance(now)) PullCompleted?.Invoke(Pull.Label);
+            if (now >= nextIdlePoll)
+            {
+                nextIdlePoll = now + 1000;
+                idleAway.Tick(config.IdleAwayEnabled, IsOn, config.Presence, config.PresenceNote,
+                    config.IdleAwayEnabled ? IdleInput.ReadMilliseconds() : null,
+                    Math.Clamp(config.IdleAwayMinutes, 1, 120) * 60_000L,
+                    (presence, note) => Guard(n => { n.SetPresence((PresenceStatus)presence, note); return ""; }).Length == 0);
+            }
             // Bounded per frame; the rest waits for the next one.
             for (int batch = 0; batch < 4; batch++)
             {
@@ -307,7 +397,7 @@ public sealed class LanternService : IDisposable
 
     private static string Hex(byte[] id) => Convert.ToHexStringLower(id);
 
-    private string NameOf(string id)
+    public string NameOf(string id)
     {
         var f = Friends.FirstOrDefault(x => x.Id == id);
         if (f is not null && f.Name.Length > 0)
@@ -324,6 +414,7 @@ public sealed class LanternService : IDisposable
                 NodeId = e.Text;
                 break;
             case LanternEventKind.FriendAdded:
+                if (NameCardInbox.Complete(e.Handle, true)) SaveNostrIgnores();
                 RefreshFriends();
                 FriendChat(peer).Add(System("You are now friends with " + ChatText.Clean(e.Text) + "."), false);
                 Arrived?.Invoke(Incoming.InviteAccepted, ChatBook.FriendKey(peer), ChatText.Clean(e.Text), "is now your friend");
@@ -332,6 +423,7 @@ public sealed class LanternService : IDisposable
                 RefreshFriends();
                 break;
             case LanternEventKind.InviteFailed:
+                NameCardInbox.Complete(e.Handle, false);
                 Say("That invite did not work: " + e.Text);
                 break;
             case LanternEventKind.FriendOnline:
@@ -354,10 +446,40 @@ public sealed class LanternService : IDisposable
             case LanternEventKind.FriendDelivered:
                 FriendChat(peer).Mark(e.Handle, LineState.Delivered);
                 break;
+            case LanternEventKind.NostrDone:
+            case LanternEventKind.NostrFailed:
+                nostrOperation.Completed(e.Handle, ChatText.Clamp(ChatText.Clean(e.Text), 512));
+                break;
+            case LanternEventKind.NostrInvite:
+                if (config.NostrInvitesEnabled) NameCardInbox.Add(peer, e.Text);
+                break;
+            case LanternEventKind.BlobOffer:
+                FileOffers.Add(e.Handle, peer, e.Text,
+                    room => room == 0 ? Friends.Any(f => f.Id == peer)
+                        : Channel(room) is { } channel && !config.Muted.Contains(channel.Key),
+                    id => !Blocked.Contains(id, StringComparer.OrdinalIgnoreCase)
+                        && !config.Muted.Contains(ChatBook.FriendKey(id)));
+                break;
+            case LanternEventKind.BlobProgress:
+                FileOffers.Progress(e.Handle, e.Progress.Done);
+                break;
+            case LanternEventKind.BlobWithdrawn:
+                FileOffers.Withdraw(e.Handle);
+                break;
+            case LanternEventKind.BlobDone:
+                // The bounded native path verifies content and exact size before completion.
+                // Never use event text as a destination or automatically open the file.
+                if (queuedFileDownloads.Remove(e.Handle)) FileOffers.Complete(e.Handle, true);
+                else FilePublicationResult(e.Handle, true);
+                break;
+            case LanternEventKind.BlobFailed:
+                if (queuedFileDownloads.Remove(e.Handle)) FileOffers.Complete(e.Handle, false);
+                else FilePublicationResult(e.Handle, false);
+                break;
             case LanternEventKind.ChannelInvite:
             {
                 var (kind, ticket) = Tickets.Find(e.Text);
-                if (kind == TicketKind.Room && !ChannelInvites.Any(c => c.Ticket == ticket) && !Channels.Any(c => c.Ticket == ticket))
+                if ((kind is TicketKind.Room or TicketKind.SealedRoom) && !ChannelInvites.Any(c => c.Ticket == ticket) && !Channels.Any(c => c.Ticket == ticket))
                 {
                     ChannelInvites.Add(new ChannelInviteOffer(peer, NameOf(peer), ticket, "a channel"));
                     Arrived?.Invoke(Incoming.FriendText, ChatBook.FriendKey(peer), NameOf(peer), "invited you to a channel (open Lantern to join or ignore)");
@@ -383,11 +505,36 @@ public sealed class LanternService : IDisposable
                 var text = ChatText.Clean(Encoding.UTF8.GetString(e.Data));
                 if (text.Length == 0)
                     break;
+                if (PullEnvelope.Parse(text) is { } seconds && config.PullTimersEnabled && !config.Muted.Contains(c.Key))
+                    Pull.Start(seconds, c.Key, c.Label, Environment.TickCount64);
                 ChannelChat(c).Add(new ChatLine(DateTimeOffset.Now, NameOf(peer), ChatText.Clamp(text, ChatText.MaxChannelBytes), false),
                     NotifyPolicy.CountsUnread(c.Key, NotifySettings, OpenConversation));
                 Arrived?.Invoke(Incoming.ChannelLine, c.Key, NameOf(peer) + " in #" + c.Label, text);
                 break;
             }
+            case LanternEventKind.ChannelRecord or LanternEventKind.ChannelHistory when Channel(e.Handle) is { } c:
+            {
+                var record = Lantern.ChannelRecord.FromNativeEvent(e);
+                if (record is null) break;
+                var outgoing = record.Author == NodeId;
+                var line = new ChatLine(record.ClaimedTime ?? DateTimeOffset.Now, outgoing ? "" : NameOf(record.Author),
+                    record.Text, outgoing, Verified: true, HistorySignature: record.Signature, ClaimedAt: record.ClaimedAt, SignedAuthor: record.Author);
+                if (record.Historical) ChannelChat(c).LoadHistory([line]);
+                else
+                {
+                    ChannelChat(c).Add(line, !outgoing && NotifyPolicy.CountsUnread(c.Key, NotifySettings, OpenConversation));
+                    if (!outgoing)
+                    {
+                        if (PullEnvelope.Parse(record.Text) is { } seconds && config.PullTimersEnabled && !config.Muted.Contains(c.Key))
+                            Pull.Start(seconds, c.Key, c.Label, Environment.TickCount64);
+                        Arrived?.Invoke(Incoming.ChannelLine, c.Key, NameOf(record.Author) + " in #" + c.Label, record.Text);
+                    }
+                }
+                break;
+            }
+            case LanternEventKind.ChannelHistoryCleared when Channel(e.Handle) is { } c:
+                ChannelChat(c).Clear();
+                break;
             case LanternEventKind.RateLimited:
                 Say($"{NameOf(peer)} is sending too fast; some of their {e.Text} messages were dropped.");
                 break;
@@ -464,6 +611,128 @@ public sealed class LanternService : IDisposable
     // ------------------------------------------------------------- actions
     // Each returns "" on success or a sentence for the player.
 
+    private void SaveNostrIgnores()
+    {
+        config.NostrIgnoredInvites = NameCardInbox.IgnoredKeys.ToList();
+        save();
+    }
+
+    public string AcceptNostrInvite(string key) => Guard(n =>
+    {
+        if (!config.NostrInvitesEnabled) return "Name-card invites are disabled.";
+        var offer = NameCardInbox.Find(key);
+        if (offer is null) return "That invitation is no longer pending.";
+        if (offer.AcceptHandle != 0) return "Already asking them…";
+        NameCardInbox.AcceptStarted(key, n.InviteAccept(offer.Ticket));
+        return "";
+    });
+
+    public void IgnoreNostrInvite(string key)
+    {
+        if (NameCardInbox.Ignore(key)) SaveNostrIgnores();
+    }
+
+    public void SetNostrInvitesEnabled(bool enabled)
+    {
+        config.NostrInvitesEnabled = enabled;
+        if (!enabled)
+        {
+            nostrPreparation?.Cancel();
+            NameCardInbox.ClearPending();
+            NostrResolvedName = NostrResolvedKey = "";
+        }
+        save();
+    }
+
+    private string PrepareNostr(Func<LanternNode, string[], CancellationToken, (string Status, ulong Job)> prepare)
+    {
+        var n = node;
+        if (n is null) return "Lantern is off.";
+        if (!config.NostrInvitesEnabled) return "Enable name-card invites first.";
+        if (!n.SupportsNostrInvites) return "This Lantern build does not include name-card invites.";
+        if (NostrBusy) return "Name-card preparation is already running.";
+        var relays = (config.NostrRelays ?? []).ToArray();
+        var gen = generation;
+        nostrPreparation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        nostrPreparation = cancellation;
+        nostrOperation.Begin();
+        Background(() =>
+        {
+            (string Status, ulong Job) result;
+            lock (nostrWorkGate)
+            {
+                if (gen != Volatile.Read(ref generation)) return;
+                try
+                {
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    result = prepare(n, relays, cancellation.Token);
+                }
+                catch (OperationCanceledException) { result = ("Name-card preparation canceled.", 0); }
+                catch (Exception ex) { result = (ex is LanternException or ArgumentException
+                    ? ex.Message : "Name-card preparation failed.", 0); }
+            }
+            onFramework.Enqueue(() =>
+            {
+                if (gen != generation || node != n) return;
+                nostrOperation.Prepared(result.Status, result.Job);
+            });
+        });
+        return "";
+    }
+
+    public string PrepareNostrIdentity() => PrepareNostr((n, _, cancellation) =>
+    {
+        var npub = n.NostrIdentity();
+        var gen = Volatile.Read(ref generation);
+        onFramework.Enqueue(() => { if (gen == generation && node == n) NostrNpub = npub; });
+        return ("Name card ready.", 0UL);
+    });
+
+    public string ResolveNostrName(string identifier)
+    {
+        if (NostrBusy) return "Name-card preparation is already running.";
+        NostrResolvedName = NostrResolvedKey = "";
+        return PrepareNostr((n, _, cancellation) =>
+        {
+            var gen = Volatile.Read(ref generation);
+            using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false };
+            using var client = new HttpClient(handler);
+            var key = NameCardLookup.Resolve(client, identifier, cancellation).GetAwaiter().GetResult();
+            onFramework.Enqueue(() =>
+            {
+                if (gen != generation || node != n || cancellation.IsCancellationRequested) return;
+                NostrResolvedName = identifier;
+                NostrResolvedKey = key;
+            });
+            return ("Domain mapping ready. Review the public key before sending.", 0UL);
+        });
+    }
+
+    public string SendNostrInvite(string recipient)
+    {
+        if (recipient.Contains('@'))
+        {
+            if (recipient != NostrResolvedName || NostrResolvedKey.Length != 64)
+                return "Resolve this name and review its public key first.";
+            recipient = NostrResolvedKey;
+        }
+        var key = recipient;
+        return PrepareNostr((n, relays, cancellation) =>
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var job = n.NostrSendInvite(relays, key);
+            return ("Invite queued; waiting for relay confirmation.", job);
+        });
+    }
+
+    public string CheckNostrInbox() => PrepareNostr((n, relays, cancellation) =>
+    {
+        cancellation.ThrowIfCancellationRequested();
+        var job = n.NostrCheckInbox(relays);
+        return ("Checking chosen relays…", job);
+    });
+
     private string Guard(Func<LanternNode, string> action)
     {
         if (node is null)
@@ -511,10 +780,29 @@ public sealed class LanternService : IDisposable
         text = ChatText.Clamp(text.Trim(), ChatText.MaxChannelBytes);
         if (text.Length == 0)
             return "";
-        n.RoomSend(c.Room, text);
-        ChannelChat(c).Add(new ChatLine(DateTimeOffset.Now, "", text, true), false);
+        if (config.ChannelHistoryEnabled && n.SupportsChannelHistory)
+            n.RoomSendWithHistory(c.Room, text); // Own verified event supplies its signature.
+        else
+        {
+            n.RoomSend(c.Room, text);
+            ChannelChat(c).Add(new ChatLine(DateTimeOffset.Now, "", text, true), false);
+        }
         return "";
     });
+
+    public string StartPull(int seconds, string channelName)
+    {
+        if (!config.PullTimersEnabled) return "Channel pull timers are disabled in Settings.";
+        if (seconds is < 1 or > 60) return "Pull duration must be 1–60 seconds.";
+        var key = PullChannels.Resolve(Channels.Select(c => (c.Key, c.Label)), channelName, OpenConversation);
+        var channel = Channels.FirstOrDefault(c => c.Key == key);
+        if (channel == null) return "Choose one joined channel by name, or open its conversation first.";
+        if (config.Muted.Contains(channel.Key)) return "Unmute the channel before starting a pull timer.";
+        if (Pull.Remaining(Environment.TickCount64) is > 0) return "A Lantern pull timer is already running.";
+        var error = SendToChannel(channel, PullEnvelope.Encode(seconds));
+        if (error.Length == 0) Pull.Start(seconds, channel.Key, channel.Label, Environment.TickCount64);
+        return error;
+    }
 
     public (string Ticket, string Error) CreateInvite(uint ttlSeconds)
     {
@@ -536,12 +824,13 @@ public sealed class LanternService : IDisposable
         return "";
     });
 
-    public string CreateChannel(string label) => Guard(n =>
+    public string CreateChannel(string label, bool sealedChannel = false) => Guard(n =>
     {
         label = ChatText.Clamp(ChatText.Clean(label), 40);
         if (label.Length == 0)
             return "Give the channel a name.";
-        ulong room = n.ChannelCreate(label);
+        if (sealedChannel && !n.SupportsSealedChannels) return "Update Lantern to create sealed channels.";
+        ulong room = sealedChannel ? n.ChannelCreateSealed(label) : n.ChannelCreate(label);
         var saved = new SavedChannel { Label = label, Ticket = n.RoomTicket(room) };
         config.Channels.Add(saved);
         save();
@@ -552,8 +841,9 @@ public sealed class LanternService : IDisposable
     public string JoinChannel(string pasted, string label = "") => Guard(n =>
     {
         var (kind, ticket) = Tickets.Find(pasted);
-        if (kind != TicketKind.Room)
+        if (kind is not (TicketKind.Room or TicketKind.SealedRoom))
             return "That is " + Tickets.Describe(kind) + ", not a channel ticket.";
+        if (kind == TicketKind.SealedRoom && !n.SupportsSealedChannels) return "Update Lantern to join sealed channels. This ticket cannot be joined as an ordinary channel.";
         if (Channels.Any(c => c.Ticket == ticket))
             return "";
         var saved = new SavedChannel { Label = label.Length > 0 ? label : "channel", Ticket = ticket };
@@ -571,6 +861,11 @@ public sealed class LanternService : IDisposable
             return false;
         try
         {
+            if (saved.Ticket.StartsWith("ltsealed", StringComparison.Ordinal) && !node.SupportsSealedChannels)
+            {
+                Say("Update Lantern to rejoin this sealed channel.");
+                return false;
+            }
             ulong room = node.RoomJoin(RoomScope.Custom, saved.Label, saved.Ticket);
             Joined(room, saved);
             return true;
@@ -587,15 +882,40 @@ public sealed class LanternService : IDisposable
         var c = new ChannelInfo(room, saved.Label, saved.Ticket);
         Channels.Add(c);
         ChannelChat(c);
+        if (node?.SupportsChannelHistory == true)
+            node.RoomHistoryEnable(room, config.ChannelHistoryEnabled);
         // Other members learn the name the player typed, nothing else.
         if (config.DisplayName.Trim().Length > 0)
             node?.PresenceSet(room, Encoding.UTF8.GetBytes(ChatText.Clamp(config.DisplayName.Trim(), ChatText.MaxName * 4)));
     }
 
+    public string SetChannelHistory(bool enabled)
+    {
+        config.ChannelHistoryEnabled = enabled;
+        if (node is null) return "";
+        if (!node.SupportsChannelHistory) return enabled ? "Update Lantern's native library for channel catch-up." : "";
+        return Guard(n => { foreach (var c in Channels) n.RoomHistoryEnable(c.Room, enabled); return ""; });
+    }
+
+    public string RefreshChannelHistory(ChannelInfo c) => Guard(n =>
+    {
+        if (!config.ChannelHistoryEnabled) return "Enable channel catch-up in Settings first.";
+        n.RoomHistoryEnable(c.Room, true);
+        return "";
+    });
+
+    public string ClearChannelHistory(ChannelInfo c) => Guard(n =>
+    {
+        n.RoomHistoryClear(c.Room); // Clear the view only on native success acknowledgement.
+        return "";
+    });
+
     public string LeaveChannel(ChannelInfo c) => Guard(n =>
     {
+        ForgetFileOffers(o => o.Room == c.Room);
         n.RoomLeave(c.Room);
         Channels.Remove(c);
+        outgoingFiles.RemoveAll(o => o.Room == c.Room);
         config.Channels.RemoveAll(s => s.Ticket == c.Ticket);
         save();
         return "";
@@ -603,10 +923,245 @@ public sealed class LanternService : IDisposable
 
     public void IgnoreChannelInvite(ChannelInviteOffer offer) => ChannelInvites.Remove(offer);
 
+    private bool FileAllowed(FileOffer offer) => IsOn
+        && (offer.Room == 0 ? Friends.Any(f => f.Id == offer.Peer)
+            : Channel(offer.Room) is { } channel && !config.Muted.Contains(channel.Key))
+        && !config.Muted.Contains(ChatBook.FriendKey(offer.Peer))
+        && !Blocked.Contains(offer.Peer, StringComparer.OrdinalIgnoreCase);
+
+    public string ClearSharedFileCache()
+    {
+        if (!CanClearSharedCache) return "Turn Lantern off and wait for background work to finish before clearing its shared-file cache.";
+        SharedCacheBusy = true;
+        SharedCacheStatus = "Clearing shared-file cache…";
+        Background(() =>
+        {
+            string result;
+            try
+            {
+                lock (nostrWorkGate)
+                {
+                    var removed = SharedFileCache.Clear(Path.GetDirectoryName(dbPath)!);
+                    result = $"Shared-file cache cleared ({removed / 1024.0 / 1024:F1} MiB). Saved downloads and identity data were kept.";
+                }
+            }
+            catch (Exception) { result = "The shared-file cache could not be completely cleared. Locked, linked or unexpected files may remain."; }
+            onFramework.Enqueue(() => { SharedCacheBusy = false; SharedCacheStatus = result; });
+        });
+        return "";
+    }
+
+    public string OfferFile(ChannelInfo channel, string path) => PrepareFileOffer(channel.Room, channel.Key, path);
+    public string OfferFriendFile(FriendView friend, string path) => PrepareFileOffer(0, ChatBook.FriendKey(friend.Id), path);
+
+    private bool PublicationAllowed(ulong room, string key) => !config.Muted.Contains(key)
+        && (room == 0 ? SupportsFriendFiles && Friends.Any(f => ChatBook.FriendKey(f.Id) == key && f.Linked
+            && !Blocked.Contains(f.Id, StringComparer.OrdinalIgnoreCase)) : Channel(room)?.Key == key);
+
+    private string PrepareFileOffer(ulong room, string key, string path)
+    {
+        var current = node;
+        if (current == null || !SupportsFileDownloads) return "Update Lantern to share files.";
+        if (FileSendBusy) return "Wait for the current file to finish preparing.";
+        if (!PublicationAllowed(room, key)) return "Choose an unmuted channel or a connected friend first.";
+        if (sharedFileCount >= 16 || sharedFileBytes + FileOffers.MaxBytes > 64 * 1024 * 1024)
+            return "The session file-sharing limit has been reached. Turn Lantern off to reset this limit; use Clear shared-file cache to remove cached copies.";
+        var sealedUpload = room != 0 && Channel(room)?.Sealed == true;
+        if (sealedUpload && !current.SupportsSealedChannels) return "Update Lantern to share files in sealed channels.";
+        var cacheBudget = (ulong)Math.Clamp(config.SharedCacheBudgetMiB, 64, 1024) * 1024 * 1024;
+        FileSendBusy = true;
+        FileSendStatus = "Preparing file…";
+        var expectedGeneration = generation;
+        Background(() =>
+        {
+            ulong handle = 0;
+            ulong size = 0;
+            var name = "";
+            var error = "";
+            try
+            {
+                SharedFileCache.CheckBudget(Path.GetDirectoryName(dbPath)!, cacheBudget);
+                var snapshot = FileDownloads.ReadOffer(path);
+                size = (ulong)snapshot.Bytes.Length;
+                name = snapshot.Name;
+                lock (nostrWorkGate)
+                {
+                    if (expectedGeneration != Volatile.Read(ref generation)) return;
+                    handle = sealedUpload ? current.BlobAddSealedBytes(room, snapshot.Bytes, snapshot.Name)
+                        : current.BlobAddBytes(snapshot.Bytes, snapshot.Name);
+                }
+            }
+            catch (SharedCacheException ex) { error = ex.Message; }
+            catch (Exception) { error = "The file could not be prepared. Choose a readable file of at most 16 MiB."; }
+            onFramework.Enqueue(() =>
+            {
+                if (expectedGeneration != generation || node != current) return;
+                if (error.Length > 0)
+                {
+                    FileSendBusy = false;
+                    FileSendStatus = error;
+                    earlyFilePublication.Clear();
+                    return;
+                }
+                sharedFileBytes += size;
+                sharedFileCount++;
+                filePublication = new OutgoingFileOffer(handle, room, key, name, size);
+                FileSendStatus = "Preparing file…";
+                if (earlyFilePublication.Remove(handle, out var success)) FilePublicationResult(handle, success);
+                earlyFilePublication.Clear();
+            });
+        });
+        return "";
+    }
+
+    private void FilePublicationResult(ulong handle, bool success)
+    {
+        if (!FileSendBusy) return;
+        if (filePublication is not { } publication)
+        {
+            if (earlyFilePublication.Count < 8) earlyFilePublication.TryAdd(handle, success);
+            return;
+        }
+        if (publication.Handle != handle) return;
+        filePublication = null;
+        FileSendBusy = false;
+        if (!success) { FileSendStatus = "The file could not be prepared."; return; }
+        if (!PublicationAllowed(publication.Room, publication.Key))
+        {
+            FileSendStatus = "The conversation is no longer available; the file was not offered.";
+            return;
+        }
+        FileSendStatus = Guard(n => {
+            if (publication.Room == 0) n.FriendFileOffer(Convert.FromHexString(publication.Key[2..]), handle);
+            else n.BlobOffer(publication.Room, handle);
+            return "";
+        });
+        if (FileSendStatus.Length == 0)
+        {
+            outgoingFiles.Add(publication);
+            FileSendStatus = "File offer queued. Delivery is not confirmed; recipients choose whether to download it.";
+        }
+    }
+
+    public string WithdrawFileOffer(OutgoingFileOffer offer) => Guard(n =>
+    {
+        if (!outgoingFiles.Contains(offer)) return "That outgoing offer is no longer available.";
+        // Withdrawal remains possible when muted; it never starts a new publication.
+        if (offer.Room == 0)
+            n.FriendFileWithdraw(Convert.FromHexString(offer.Key[2..]), offer.Handle);
+        else
+            n.BlobUnoffer(offer.Room, offer.Handle);
+        outgoingFiles.Remove(offer);
+        return "Withdrawal queued. Copies already downloaded remain with recipients; cached local bytes are unchanged.";
+    });
+
+    public string DownloadFile(ulong handle)
+    {
+        var current = node;
+        var offer = FileOffers.Find(handle);
+        if (current == null || !SupportsFileDownloads) return "Update Lantern to download shared files.";
+        if (offer == null || !FileAllowed(offer)) return "That file offer is no longer available.";
+        var directory = Path.Combine(Path.GetDirectoryName(dbPath)!, "downloads");
+        var destination = FileOffers.BeginFetch(handle, directory, FileAllowed);
+        if (destination == null) return "Two downloads can run at once; wait or cancel one first.";
+        var expectedGeneration = generation;
+        var downloadBudget = (ulong)Math.Clamp(config.DownloadBudgetMiB, 32, 1024) * 1024 * 1024;
+        var retentionDays = Math.Clamp(config.DownloadRetentionDays, 0, 90);
+        var protectedPaths = FileOffers.All.Where(o => o.State is FileOfferState.Fetching or FileOfferState.Canceling)
+            .Select(o => o.Destination).Where(p => p.Length > 0).ToArray();
+        Background(() =>
+        {
+            var error = "";
+            IReadOnlyList<string> deleted = [];
+            try
+            {
+                lock (fileStorageGate)
+                {
+                    if (retentionDays > 0) deleted = FileDownloads.CleanupExpired(Path.GetDirectoryName(dbPath)!, retentionDays, protectedPaths, DateTime.UtcNow);
+                    FileDownloads.PrepareDirectory(Path.GetDirectoryName(dbPath)!, downloadBudget);
+                }
+            }
+            catch (DownloadBudgetException ex) { error = ex.Message; }
+            catch (Exception) { error = "The download folder could not be prepared safely."; }
+            onFramework.Enqueue(() =>
+            {
+                if (generation != expectedGeneration || node != current) return;
+                FileOffers.RemoveWhere(o => o.State == FileOfferState.Saved && deleted.Contains(o.Destination));
+                var pending = FileOffers.Find(handle);
+                if (pending?.Destination != destination) return; // A canceled preparation may have been retried.
+                if (pending?.State != FileOfferState.Fetching || !FileAllowed(pending))
+                {
+                    FileOffers.Complete(handle, false);
+                    return;
+                }
+                if (error.Length == 0)
+                {
+                    try { current.BlobFetchBounded(handle, destination); queuedFileDownloads.Add(handle); }
+                    catch (Exception) { error = "The file download could not start."; }
+                }
+                if (error.Length > 0) { FileOffers.Complete(handle, false); FileDownloadStatus = error; }
+            });
+        });
+        FileDownloadStatus = "";
+        return "";
+    }
+
+    public string CancelFileDownload(ulong handle)
+    {
+        var offer = FileOffers.Find(handle);
+        if (offer?.State != FileOfferState.Fetching) return "That download is not running.";
+        if (!queuedFileDownloads.Contains(handle))
+        {
+            FileOffers.CancelRequested(handle);
+            FileOffers.Complete(handle, false);
+            return "";
+        }
+        try { node?.BlobCancelBounded(handle); }
+        catch (LanternException)
+        {
+            return "The download has finished; waiting for its result.";
+        }
+        FileOffers.CancelRequested(handle);
+        return "";
+    }
+
+    private void ForgetFileOffers(Func<FileOffer, bool> remove)
+    {
+        foreach (var offer in FileOffers.All.Where(remove).ToList())
+            if (offer.State is FileOfferState.Fetching or FileOfferState.Canceling && SupportsFileDownloads)
+                try { node?.BlobCancelBounded(offer.Handle); } catch (LanternException) { }
+        FileOffers.RemoveWhere(remove);
+    }
+
+    public string ResealChannel(ChannelInfo channel, IReadOnlyCollection<string> selectedFriends) => Guard(n =>
+    {
+        if (!n.SupportsSealedChannels) return "Update Lantern to reseal channels.";
+        if (!channel.Sealed || !Channels.Contains(channel)) return "Choose a current sealed channel.";
+        var recipients = selectedFriends.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(id => Friends.FirstOrDefault(f => string.Equals(f.Id, id, StringComparison.OrdinalIgnoreCase))).ToList();
+        if (recipients.Any(f => f == null || !f.Linked || Blocked.Contains(f.Id, StringComparer.OrdinalIgnoreCase)))
+            return "A selected friend is no longer connected. Review the selection and try again.";
+        ulong room = n.ChannelReseal(channel.Room);
+        var saved = new SavedChannel { Label = channel.Label, Ticket = n.RoomTicket(room) };
+        config.Channels.Add(saved);
+        if (config.Muted.Contains(channel.Key)) config.Muted.Add(ChatBook.ChannelKey(saved.Ticket));
+        save();
+        Joined(room, saved);
+        int failed = 0;
+        foreach (var friend in recipients)
+            try { n.ChannelInvite(friend!.Key, room); } catch (LanternException) { failed++; }
+        return failed == 0 ? "" : $"New sealed channel created; {failed} invitation(s) could not be queued. Retry from the friends menu.";
+    });
+
     public string InviteToChannel(FriendView f, ChannelInfo c) => Guard(n =>
     {
-        n.ChannelInvite(f.Key, c.Room);
-        ChannelChat(c).Add(System("Invited " + f.Display + "."), false);
+        if (!Channels.Contains(c)) return "That channel is no longer joined.";
+        var recipient = Friends.FirstOrDefault(current => string.Equals(current.Id, f.Id, StringComparison.OrdinalIgnoreCase));
+        if (recipient is null || !recipient.Linked || Blocked.Contains(recipient.Id, StringComparer.OrdinalIgnoreCase))
+            return "That friend is no longer available for an invitation.";
+        if (c.Sealed && !n.SupportsSealedChannels) return "Update Lantern to invite friends to sealed channels.";
+        n.ChannelInvite(recipient.Key, c.Room);
+        ChannelChat(c).Add(System("Invitation queued for " + recipient.Display + "."), false);
         return "";
     });
 
@@ -626,12 +1181,29 @@ public sealed class LanternService : IDisposable
         config.PresenceNote = ChatText.Clamp(ChatText.Clean(note), ChatText.MaxNote * 4);
         save();
         n.SetPresence((PresenceStatus)presence, config.PresenceNote);
+        idleAway.ManualChanged();
         return "";
     });
+
+    public bool SupportsActivityTags => node?.SupportsActivityTags ?? false;
+
+    public string SetActivityTags(IEnumerable<string> tags)
+    {
+        var cleaned = ActivityTags.Normalize(tags);
+        if (IsOn)
+        {
+            var error = Guard(n => { n.SetActivityTags(cleaned); return ""; });
+            if (error.Length > 0) return error;
+        }
+        config.ActivityTags = cleaned;
+        save();
+        return "";
+    }
 
     public string RemoveFriend(FriendView f) => Guard(n =>
     {
         n.FriendRemove(f.Key);
+        outgoingFiles.RemoveAll(o => o.Room == 0 && o.Key == ChatBook.FriendKey(f.Id));
         RefreshFriends();
         return "";
     });
@@ -639,8 +1211,10 @@ public sealed class LanternService : IDisposable
     public string Block(string id) => Guard(n =>
     {
         n.Block(Convert.FromHexString(id));
+        outgoingFiles.RemoveAll(o => o.Room == 0 && string.Equals(o.Key, ChatBook.FriendKey(id), StringComparison.OrdinalIgnoreCase));
         RefreshFriends();
         RefreshBlocked();
+        ForgetFileOffers(o => string.Equals(o.Peer, id, StringComparison.OrdinalIgnoreCase));
         return "";
     });
 
@@ -654,7 +1228,10 @@ public sealed class LanternService : IDisposable
     public void ToggleMute(string key)
     {
         if (!config.Muted.Remove(key))
+        {
             config.Muted.Add(key);
+            ForgetFileOffers(o => ChatBook.FriendKey(o.Peer) == key || Channel(o.Room)?.Key == key);
+        }
         save();
     }
 

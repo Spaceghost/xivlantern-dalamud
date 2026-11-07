@@ -167,7 +167,8 @@ impl Node {
                 let mut raised = 0;
                 for (from, invite) in found? {
                     let known = shared.friends.read().unwrap().contains_key(&invite.addr.id);
-                    if invite.addr.id == me || known || invite.is_expired(now) || !seen.insert(invite.secret) {
+                    if invite.addr.id == me || known || shared.is_blocked(&invite.addr.id)
+                        || invite.is_expired(now) || !seen.insert(invite.secret) {
                         continue;
                     }
                     raised += 1;

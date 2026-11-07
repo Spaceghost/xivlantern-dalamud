@@ -1,6 +1,6 @@
 // The friendly half of the C# binding.
 //
-// Every method here except Open and Dispose is safe to call from the game's
+// Every method here except Open, Dispose and Nostr* is safe to call from the game's
 // frame thread: they push work onto a queue in the native library and return.
 // Results arrive from Poll(), which is expected to be called once per frame.
 
@@ -115,7 +115,13 @@ public sealed unsafe class LanternNode : IDisposable
             throw new LanternException("could not open the node", status);
         }
 
-        return new LanternNode(node);
+        var result = new LanternNode(node);
+        if (result.SupportsChannelHistory)
+        {
+            try { Check(Native.ChannelRecordEventsEnable(node, 1), "signed record events"); }
+            catch { result.Dispose(); throw; }
+        }
+        return result;
     }
 
     public static string BuildInfo
@@ -254,6 +260,32 @@ public sealed unsafe class LanternNode : IDisposable
 
     public void RoomSend(ulong room, string text) => RoomSend(room, Encoding.UTF8.GetBytes(text));
 
+    public bool SupportsChannelHistory => Native.ChannelRecordEventsEnable != null && Native.RoomHistoryEnable != null && Native.RoomHistoryClear != null && Native.RoomSendWithHistory != null;
+
+    /// <summary>Queue saved-history loading and automatic catch-up/serving; off by default.</summary>
+    public void RoomHistoryEnable(ulong room, bool enabled)
+    {
+        if (!SupportsChannelHistory) throw new LanternException("Update Lantern to use channel history.");
+        Check(Native.RoomHistoryEnable(Handle, room, enabled ? 1U : 0U), "channel history");
+    }
+
+    /// <summary>Clear local rows and cancel pending catch-up. Other members retain copies.</summary>
+    public void RoomHistoryClear(ulong room)
+    {
+        if (!SupportsChannelHistory) throw new LanternException("Update Lantern to use channel history.");
+        Check(Native.RoomHistoryClear(Handle, room), "clear channel history");
+    }
+
+    /// <summary>Queue signed room-bound text; record events carry its complete signature.</summary>
+    public void RoomSendWithHistory(ulong room, ReadOnlySpan<byte> text)
+    {
+        if (!SupportsChannelHistory) throw new LanternException("Update Lantern to use channel history.");
+        fixed (byte* p = text)
+            Check(Native.RoomSendWithHistory(Handle, room, p, (uint)text.Length), "signed channel send");
+    }
+
+    public void RoomSendWithHistory(ulong room, string text) => RoomSendWithHistory(room, Encoding.UTF8.GetBytes(text));
+
     public void PresenceSet(ulong room, ReadOnlySpan<byte> data)
     {
         fixed (byte* p = data)
@@ -343,6 +375,24 @@ public sealed unsafe class LanternNode : IDisposable
     public string BlobHash(ulong blob) =>
         Text((b, len, need) => Native.BlobHashText(Handle, blob, b, len, need), "blob hash");
 
+    public bool SupportsBoundedFileFetch => Native.BlobFetchBounded != null && Native.BlobCancelBounded != null;
+
+    /// <summary>Explicit bounded, hash-verified remote file fetch. Destination must
+    /// be new and its parent privately controlled; no unsafe old-library fallback.</summary>
+    public void BlobFetchBounded(ulong blob, string outPath)
+    {
+        if (!SupportsBoundedFileFetch) throw new NotSupportedException("Update Lantern to download shared files safely.");
+        if (string.IsNullOrWhiteSpace(outPath) || outPath.Contains('\0')) throw new ArgumentException("Choose a valid download path.", nameof(outPath));
+        using var buf = new Utf8Buffer(outPath);
+        Check(Native.BlobFetchBounded(Handle, blob, (byte*)buf.Pointer), "bounded fetch");
+    }
+
+    public void BlobCancelBounded(ulong blob)
+    {
+        if (!SupportsBoundedFileFetch) throw new NotSupportedException("Update Lantern to manage shared file downloads safely.");
+        Check(Native.BlobCancelBounded(Handle, blob), "cancel bounded fetch");
+    }
+
     // -------------------------------------------------------------- friends
 
     /// <summary>The name friends see. Persisted.</summary>
@@ -360,6 +410,16 @@ public sealed unsafe class LanternNode : IDisposable
     {
         using var buf = new Utf8Buffer(note);
         Check(Native.PresenceStatusSet(Handle, (uint)status, (byte*)buf.Pointer), "presence status");
+    }
+
+    public bool SupportsActivityTags => Native.ActivityTagsSet != null;
+
+    /// <summary>Player-supplied activities; an optional extension of ABI 2.</summary>
+    public void SetActivityTags(IEnumerable<string> tags)
+    {
+        if (!SupportsActivityTags) throw new LanternException("Update Lantern to share activity tags.");
+        using var buf = new Utf8Buffer(System.Text.Json.JsonSerializer.Serialize(tags));
+        Check(Native.ActivityTagsSet(Handle, (byte*)buf.Pointer), "activity tags");
     }
 
     /// <summary>A single-use friend invite. 0 seconds never expires.</summary>
@@ -431,6 +491,50 @@ public sealed unsafe class LanternNode : IDisposable
         return room;
     }
 
+    public bool SupportsSealedChannels => SupportsBoundedFileFetch && Native.ChannelCreateSealed != null
+        && Native.ChannelReseal != null && Native.RoomIsSealed != null && Native.BlobAddSealedBytes != null;
+
+    public ulong ChannelCreateSealed(string label)
+    {
+        RequireSealedChannels();
+        using var buf = new Utf8Buffer(label);
+        ulong room;
+        Check(Native.ChannelCreateSealed(Handle, (byte*)buf.Pointer, &room), "create sealed channel");
+        return room;
+    }
+
+    public ulong ChannelReseal(ulong room)
+    {
+        RequireSealedChannels();
+        ulong next;
+        Check(Native.ChannelReseal(Handle, room, &next), "reseal channel");
+        return next;
+    }
+
+    public bool RoomIsSealed(ulong room)
+    {
+        RequireSealedChannels();
+        uint value;
+        Check(Native.RoomIsSealed(Handle, room, &value), "channel sealing mode");
+        return value == 1;
+    }
+
+    public ulong BlobAddSealedBytes(ulong room, ReadOnlySpan<byte> data, string name)
+    {
+        RequireSealedChannels();
+        if (data.Length > 16 * 1024 * 1024) throw new ArgumentOutOfRangeException(nameof(data));
+        using var nameBuf = new Utf8Buffer(name);
+        ulong blob;
+        fixed (byte* p = data)
+            Check(Native.BlobAddSealedBytes(Handle, room, p, (uint)data.Length, (byte*)nameBuf.Pointer, &blob), "prepare sealed file");
+        return blob;
+    }
+
+    private void RequireSealedChannels()
+    {
+        if (!SupportsSealedChannels) throw new NotSupportedException("Update Lantern to use sealed channels.");
+    }
+
     public void ChannelInvite(byte[] peer, ulong room)
     {
         CheckPeer(peer);
@@ -441,6 +545,22 @@ public sealed unsafe class LanternNode : IDisposable
     }
 
     // --------------------------------------------------------------- safety
+
+    public bool SupportsFriendFiles => SupportsBoundedFileFetch && Native.FriendFileOffer != null && Native.FriendFileWithdraw != null;
+
+    public void FriendFileOffer(byte[] peer, ulong blob)
+    {
+        CheckPeer(peer);
+        if (!SupportsFriendFiles) throw new NotSupportedException("Update Lantern to share files with friends.");
+        fixed (byte* p = peer) Check(Native.FriendFileOffer(Handle, p, blob), "friend file offer");
+    }
+
+    public void FriendFileWithdraw(byte[] peer, ulong blob)
+    {
+        CheckPeer(peer);
+        if (!SupportsFriendFiles) throw new NotSupportedException("Update Lantern to manage shared files.");
+        fixed (byte* p = peer) Check(Native.FriendFileWithdraw(Handle, p, blob), "friend file withdrawal");
+    }
 
     /// <summary>Block a node: silently dropped from friends, and refused from then on. Persisted.</summary>
     public void Block(byte[] peer)
@@ -546,6 +666,69 @@ public sealed unsafe class LanternNode : IDisposable
         ulong handle;
         Check(Native.SelfTest(Handle, &handle), "selftest");
         return handle;
+    }
+
+    /// <summary>Whether this library includes all optional name-card invite exports.</summary>
+    public bool SupportsNostrInvites => Native.NostrIdentity != null
+        && Native.NostrSendInvite != null && Native.NostrCheckInbox != null;
+
+    private void RequireNostrInvites()
+    {
+        if (!SupportsNostrInvites)
+            throw new LanternException("This Lantern library does not include name-card invites.");
+    }
+
+    /// <summary>Create/load the local identity and return its public npub. Background thread only;
+    /// may touch SQLite/cryptography. No network. Keep the node alive until this call returns.</summary>
+    public string NostrIdentity()
+    {
+        RequireNostrInvites();
+        return Text((b, len, need) => Native.NostrIdentity(Handle, b, len, need), "name-card identity");
+    }
+
+    /// <summary>Queue an invite to an npub/nprofile/hex key. Background thread only; preparation
+    /// touches SQLite/cryptography. Explicit relays; completion arrives via NostrDone/NostrFailed.
+    /// Keep the node alive until this call returns.</summary>
+    public ulong NostrSendInvite(IReadOnlyList<string> relays, string recipient, uint ttlSeconds = 86400)
+    {
+        RequireNostrInvites();
+        ArgumentNullException.ThrowIfNull(recipient);
+        if (recipient.Length == 0 || Encoding.UTF8.GetByteCount(recipient) > 1024
+            || recipient.Any(char.IsControl)) throw new ArgumentException("Invalid name-card recipient.", nameof(recipient));
+        if (ttlSeconds is 0 or > 604800) throw new ArgumentOutOfRangeException(nameof(ttlSeconds));
+        var encoded = EncodeNostrRelays(relays);
+        using var to = new Utf8Buffer(recipient);
+        ulong handle;
+        fixed (byte* p = encoded)
+            Check(Native.NostrSendInvite(Handle, p, (uint)encoded.Length, (byte*)to.Pointer, ttlSeconds, &handle), "name-card invite");
+        return handle;
+    }
+
+    /// <summary>Queue an inbox check on explicitly chosen relays. Background thread only;
+    /// incoming NostrInvite events require explicit acceptance. Keep the node alive until return.</summary>
+    public ulong NostrCheckInbox(IReadOnlyList<string> relays)
+    {
+        RequireNostrInvites();
+        var encoded = EncodeNostrRelays(relays);
+        ulong handle;
+        fixed (byte* p = encoded)
+            Check(Native.NostrCheckInbox(Handle, p, (uint)encoded.Length, &handle), "name-card inbox");
+        return handle;
+    }
+
+    private static byte[] EncodeNostrRelays(IReadOnlyList<string> relays)
+    {
+        ArgumentNullException.ThrowIfNull(relays);
+        if (relays.Count is < 1 or > 8) throw new ArgumentException("Choose one to eight relays.", nameof(relays));
+        foreach (var url in relays)
+            if (string.IsNullOrEmpty(url) || Encoding.UTF8.GetByteCount(url) > 2048
+                || url.Any(c => char.IsControl(c) || char.IsWhiteSpace(c))
+                || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || string.IsNullOrEmpty(uri.Host)
+                || uri.Scheme is not ("ws" or "wss"))
+                throw new ArgumentException("Invalid WebSocket relay URL.", nameof(relays));
+        var encoded = Encoding.UTF8.GetBytes(string.Join('\n', relays));
+        if (encoded.Length > 16384) throw new ArgumentException("Relay list is too long.", nameof(relays));
+        return encoded;
     }
 
     private static byte[] Flatten(IReadOnlyList<byte[]> peers)

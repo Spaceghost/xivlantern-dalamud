@@ -5,6 +5,7 @@ namespace XivLantern.Core;
 /// <summary>One friend device, as lt_friend_list describes it.</summary>
 public sealed record FriendView(string Id, string Name, bool Online, string Status, string Note, long? LastSeen, bool Linked, long FriendId)
 {
+    public IReadOnlyList<string> Tags { get; init; } = [];
     public byte[] Key => Convert.FromHexString(Id);
 
     public string Display => string.IsNullOrWhiteSpace(Name) ? Id[..10] : Name;
@@ -39,7 +40,9 @@ public static class NativeJson
 {
     public static IReadOnlyList<FriendView> Friends(string json) => Array(json, e => new FriendView(
         Str(e, "id"), ChatText.Clean(Str(e, "name")), Bool(e, "online"), Str(e, "status"), ChatText.Clean(Str(e, "note")),
-        NullableLong(e, "last_seen"), Bool(e, "linked"), Long(e, "friend")));
+        NullableLong(e, "last_seen"), Bool(e, "linked"), Long(e, "friend"))
+        { Tags = Bool(e, "online") && e.TryGetProperty("tags", out var tags) && tags.ValueKind == JsonValueKind.Array
+            ? ActivityTags.Normalize(tags.EnumerateArray().Where(t => t.ValueKind == JsonValueKind.String).Select(t => t.GetString()!)) : [] });
 
     public static IReadOnlyList<HistoryLine> History(string json) => Array(json, e => new HistoryLine(
         ULong(e, "id"), Bool(e, "outgoing"), Str(e, "text"), Long(e, "sent_at"), NullableLong(e, "delivered_at")));

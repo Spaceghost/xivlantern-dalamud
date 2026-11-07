@@ -35,6 +35,26 @@ const MAX_WIRE: usize = 16 * 1024;
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const MAX_NAME: usize = 64;
 const MAX_NOTE: usize = 256;
+const MAX_TAGS: usize = 8;
+const MAX_TAG_BYTES: usize = 32;
+
+fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in tags {
+        let value = clean(value, MAX_TAG_BYTES);
+        let mut tag = String::new();
+        for c in value.chars() {
+            if tag.len() + c.len_utf8() > MAX_TAG_BYTES { break; }
+            tag.push(c);
+        }
+        let tag = tag.trim().to_string();
+        if !tag.is_empty() && !out.iter().any(|s: &String| s.to_lowercase() == tag.to_lowercase()) {
+            out.push(tag);
+            if out.len() == MAX_TAGS { break; }
+        }
+    }
+    out
+}
 
 /// Bytes from the OS CSPRNG.
 pub(crate) fn random<const N: usize>() -> [u8; N] {
@@ -64,6 +84,7 @@ pub(crate) struct Me {
     pub name: String,
     pub status: Status,
     pub note: String,
+    pub tags: Vec<String>,
     /// This user's nostr public key, once `nostr_keys` has made one.
     pub nostr: Option<[u8; 32]>,
 }
@@ -74,6 +95,7 @@ impl Default for Me {
             name: String::new(),
             status: Status::Online,
             note: String::new(),
+            tags: Vec::new(),
             nostr: None,
         }
     }
@@ -87,6 +109,7 @@ pub(crate) struct FriendDevice {
     online: bool,
     status: Status,
     note: String,
+    tags: Vec<String>,
     last_heard: Option<Instant>,
     last_seen_ms: Option<i64>,
     dialing: bool,
@@ -103,6 +126,7 @@ impl FriendDevice {
             online: false,
             status: Status::Invisible,
             note: String::new(),
+            tags: Vec::new(),
             last_heard: None,
             last_seen_ms,
             dialing: false,
@@ -122,6 +146,8 @@ pub struct FriendInfo {
     pub online: bool,
     pub status: Status,
     pub note: String,
+    /// Activities typed or chosen by the player, hidden while offline.
+    pub tags: Vec<String>,
     /// Unix milliseconds we last heard from this device, if ever.
     pub last_seen: Option<i64>,
     /// A friend link is currently open (it may still be invisible).
@@ -192,6 +218,12 @@ pub(crate) enum Wire {
     Support { id: u64, sent_at: i64, body: String },
     /// From the author's node to somebody who wrote in.
     SupportReply { id: u64, sent_at: i64, body: String },
+    /// Append-only extension. Legacy readers drop this unknown frame and
+    /// continue reading the unchanged Hello/Heartbeat frames on other streams.
+    ActivityTags { tags: Vec<String> },
+    /// Append-only private file offer; never fetches automatically.
+    FileOffer { hash: [u8; 32], size: u64, name: String },
+    FileWithdraw { hash: [u8; 32] },
 }
 
 pub(crate) fn encode(wire: &Wire) -> Vec<u8> {
@@ -306,19 +338,24 @@ pub(crate) fn handle(shared: &Arc<Shared>, cmd: FriendCmd) {
             with_store(shared, |s| {
                 s.profile_set("name", &me.name)?;
                 s.profile_set("status", &(me.status as u32).to_string())?;
-                s.profile_set("note", &me.note)
+                s.profile_set("note", &me.note)?;
+                s.profile_set("activity_tags", &serde_json::to_string(&me.tags).expect("strings serialize"))
             });
             let hello = hello_frame(shared);
+            let tags = tags_frame(shared);
             let links: Vec<Connection> = shared.links.lock().unwrap().values().cloned().collect();
             for conn in links {
                 let shared = shared.clone();
                 let hello = hello.clone();
+                let tags = tags.clone();
                 tokio::spawn(async move {
                     let _ = send(&shared, &conn, &hello).await;
+                    let _ = send(&shared, &conn, &tags).await;
                 });
             }
         }
         FriendCmd::Remove { peer } => {
+            shared.forget_remote_blobs(|s| s.from == Some(peer) && s.room == Some(0));
             with_store(shared, |s| s.friend_remove_device(peer.as_bytes()));
             let conn = shared.links.lock().unwrap().remove(&peer);
             if let Some(conn) = conn {
@@ -394,6 +431,8 @@ pub(crate) fn load(shared: &Arc<Shared>) -> Result<()> {
             .and_then(Status::from_u32)
             .unwrap_or(Status::Online);
         me.note = store.profile_get("note")?.unwrap_or_default();
+        me.tags = clean_tags(&store.profile_get("activity_tags")?
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default());
         me.nostr = store
             .profile_get("nostr_pubkey")?
             .and_then(|h| data_encoding::HEXLOWER.decode(h.as_bytes()).ok())
@@ -439,6 +478,11 @@ fn hello_frame(shared: &Shared) -> Wire {
         status: me.status as u32,
         note: if hidden { String::new() } else { me.note },
     }
+}
+
+fn tags_frame(shared: &Shared) -> Wire {
+    let me = shared.me.read().unwrap();
+    Wire::ActivityTags { tags: if me.status == Status::Invisible { Vec::new() } else { me.tags.clone() } }
 }
 
 fn add_friend(shared: &Shared, peer: EndpointId, name: &str, addr: Option<&EndpointAddr>) {
@@ -552,6 +596,7 @@ async fn run_link(shared: Arc<Shared>, conn: Connection) {
     }
 
     let _ = send(&shared, &conn, &hello_frame(&shared)).await;
+    let _ = send(&shared, &conn, &tags_frame(&shared)).await;
     flush_outbox(&shared, &conn, peer).await;
 
     while let Ok(frame) = recv(&shared, &conn).await {
@@ -616,6 +661,30 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
             heard(shared, peer, status, note);
         }
         Wire::Heartbeat { status, note } => heard(shared, peer, status, note),
+        Wire::ActivityTags { tags } => {
+            if let Some(d) = shared.friends.write().unwrap().get_mut(&peer) {
+                d.tags = clean_tags(&tags);
+            }
+        }
+        Wire::FileOffer { hash, size, name } => {
+            if size > crate::bounded_blob::MAX_FILE_BYTES { return true; }
+            let blocked = shared.blocked.read().unwrap();
+            if blocked.contains(&peer) { return true; }
+            let friends = shared.friends.read().unwrap();
+            if !friends.contains_key(&peer) { return true; }
+            let mut blobs = shared.blobs.write().unwrap();
+            if !super::remote_offer_allowed(&blobs, 0, peer, hash, &name) { return true; }
+            let blob = shared.handle();
+            blobs.insert(blob, super::BlobState { sealed: None, hash: Some(hash), name: name.clone(),
+                size, from: Some(peer), room: Some(0) });
+            drop(blobs);
+            shared.emit(Event::BlobOffer { room: 0, peer: peer_bytes, blob,
+                meta: crate::BlobMeta { hash, size, name } });
+            drop(friends);
+            drop(blocked);
+        }
+        Wire::FileWithdraw { hash } => shared.forget_remote_blobs(|s|
+            s.room == Some(0) && s.from == Some(peer) && s.hash == Some(hash)),
         Wire::Text { id, body, .. } if body.len() > MAX_TEXT => {
             // Our own clients never send this; ack so it is not retried
             // forever, and drop it.
@@ -646,7 +715,7 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
             }
         }
         Wire::ChannelInvite { ticket } => {
-            if ticket.parse::<RoomTicket>().is_ok() {
+            if ticket.parse::<RoomTicket>().is_ok() || ticket.parse::<crate::ticket::SealedRoomTicket>().is_ok() {
                 shared.emit(Event::ChannelInvite {
                     peer: peer_bytes,
                     ticket,
@@ -655,6 +724,7 @@ async fn on_frame(shared: &Arc<Shared>, conn: &Connection, peer: EndpointId, wir
         }
         Wire::Unfriend => {
             shared.friends.write().unwrap().remove(&peer);
+            shared.forget_remote_blobs(|s| s.from == Some(peer) && s.room == Some(0));
             with_store(shared, |s| s.friend_remove_device(&peer_bytes));
             shared.emit(Event::FriendRemoved { peer: peer_bytes });
             conn.close(0u32.into(), b"unfriended");
@@ -949,12 +1019,15 @@ pub(crate) async fn heartbeat_loop(shared: Arc<Shared>) {
                 status: me.status as u32,
                 note: me.note.clone(),
             };
+            let tags = Wire::ActivityTags { tags: me.tags.clone() };
             for (_, conn) in &links {
                 let shared = shared.clone();
                 let conn = conn.clone();
                 let beat = beat.clone();
+                let tags = tags.clone();
                 tokio::spawn(async move {
                     let _ = send(&shared, &conn, &beat).await;
+                    let _ = send(&shared, &conn, &tags).await;
                 });
             }
         }
@@ -1074,6 +1147,25 @@ impl Node {
         self.friend_cmd(FriendCmd::Announce)
     }
 
+    /// Player-supplied activities. Persisted and announced to linked friends.
+    pub fn set_activity_tags(&self, tags: &[String]) -> Result<()> {
+        self.check_open()?;
+        self.shared.me.write().unwrap().tags = clean_tags(tags);
+        self.friend_cmd(FriendCmd::Announce)
+    }
+
+    pub fn activity_tags(&self) -> Vec<String> {
+        self.shared.me.read().unwrap().tags.clone()
+    }
+
+    /// Bounded JSON entry point for the C ABI.
+    pub fn set_activity_tags_json(&self, text: &str) -> Result<()> {
+        if text.len() > 4096 { return Err(Error::TooLarge); }
+        let tags = serde_json::from_str::<Vec<String>>(text)
+            .map_err(|_| Error::Arg("activity tags must be a JSON string array"))?;
+        self.set_activity_tags(&tags)
+    }
+
     // ------------------------------------------------------------ invites
 
     /// Mint an invite without making it redeemable yet. See
@@ -1154,6 +1246,7 @@ impl Node {
                 online: d.online,
                 status: if d.online { d.status } else { Status::Invisible },
                 note: if d.online { d.note.clone() } else { String::new() },
+                tags: if d.online { d.tags.clone() } else { Vec::new() },
                 last_seen: d.last_seen_ms,
                 linked: links.contains_key(peer),
                 nostr: d.nostr,
@@ -1175,7 +1268,7 @@ impl Node {
                 out.push(',');
             }
             out.push_str(&format!(
-                "{{\"id\":\"{}\",\"friend\":{},\"name\":{},\"online\":{},\"status\":\"{}\",\"note\":{},\"last_seen\":{},\"linked\":{},\"nostr\":{}}}",
+                "{{\"id\":\"{}\",\"friend\":{},\"name\":{},\"online\":{},\"status\":\"{}\",\"note\":{},\"last_seen\":{},\"linked\":{},\"nostr\":{},\"tags\":{}}}",
                 data_encoding::HEXLOWER.encode(&f.peer),
                 f.friend_id,
                 json_string(&f.name),
@@ -1185,6 +1278,7 @@ impl Node {
                 f.last_seen.map_or("null".to_string(), |t| t.to_string()),
                 f.linked,
                 f.nostr.map_or("null".to_string(), |k| format!("\"{}\"", data_encoding::HEXLOWER.encode(&k))),
+                serde_json::to_string(&f.tags).expect("strings serialize"),
             ));
         }
         out.push(']');
@@ -1224,8 +1318,17 @@ impl Node {
         if id == self.shared.endpoint.id() {
             return Err(Error::Arg("that is you"));
         }
-        self.shared.blocked.write().unwrap().insert(id);
+        {
+            let mut blocked = self.shared.blocked.write().unwrap();
+            blocked.insert(id);
+            self.shared.history_revision.fetch_add(1, Ordering::Relaxed);
+            self.shared.history_events.lock().unwrap().block_author(peer);
+        }
         let was_friend = self.shared.friends.write().unwrap().remove(&id).is_some();
+        self.shared.forget_remote_blobs(|s| s.from == Some(id));
+        for (sender, cancel) in self.shared.file_jobs.lock().unwrap().values() {
+            if *sender == id { let _ = cancel.send(true); }
+        }
         self.friend_cmd(FriendCmd::Block { peer: id, was_friend })
     }
 
@@ -1235,6 +1338,7 @@ impl Node {
         if !self.shared.blocked.write().unwrap().remove(&id) {
             return Err(Error::NotFound);
         }
+        self.shared.history_revision.fetch_add(1, Ordering::Relaxed);
         self.friend_cmd(FriendCmd::Unblock { peer: id })
     }
 
@@ -1308,6 +1412,7 @@ impl Node {
         self.check_open()?;
         let peer = self.require_friend(peer)?;
         self.shared.friends.write().unwrap().remove(&peer);
+        self.shared.forget_remote_blobs(|s| s.from == Some(peer) && s.room == Some(0));
         self.friend_cmd(FriendCmd::Remove { peer })
     }
 
@@ -1361,6 +1466,30 @@ impl Node {
             peer,
             wire: Wire::ChannelInvite { ticket },
         })
+    }
+
+    /// Offer an already prepared small file over an authenticated friend link.
+    /// Older friends may ignore the append-only frame; no delivery promise.
+    pub fn friend_file_offer(&self, peer: &PeerId, blob: crate::BlobHandle) -> Result<()> {
+        let peer = self.require_friend(peer)?;
+        let (hash, size, name) = {
+            let blobs = self.shared.blobs.read().unwrap();
+            let state = blobs.get(&blob).ok_or(Error::NotFound)?;
+            if state.from.is_some() { return Err(Error::Arg("only local files can be offered")); }
+            if state.sealed.is_some() { return Err(Error::State("sealed channel files cannot be offered outside their channel")); }
+            if state.size > crate::bounded_blob::MAX_FILE_BYTES { return Err(Error::Arg("file exceeds sharing bounds")); }
+            (state.hash.ok_or(Error::State("file is still preparing"))?, state.size, state.name.clone())
+        };
+        self.friend_cmd(FriendCmd::Send { peer, wire: Wire::FileOffer { hash, size, name } })
+    }
+
+    pub fn friend_file_withdraw(&self, peer: &PeerId, blob: crate::BlobHandle) -> Result<()> {
+        let peer = self.require_friend(peer)?;
+        if self.shared.blobs.read().unwrap().get(&blob).ok_or(Error::NotFound)?.sealed.is_some() {
+            return Err(Error::State("sealed channel files cannot be withdrawn outside their channel"));
+        }
+        let hash = self.blob_hash(blob)?;
+        self.friend_cmd(FriendCmd::Send { peer, wire: Wire::FileWithdraw { hash } })
     }
 }
 
@@ -1424,10 +1553,36 @@ mod tests {
                 sent_at: 5,
                 body: "on it".into(),
             },
+            Wire::ActivityTags { tags: vec!["maps".into(), "crafting".into()] },
+            Wire::FileOffer { hash: [7; 32], size: 123, name: "clear.png".into() },
+            Wire::FileWithdraw { hash: [7; 32] },
         ];
-        for f in frames {
+        for (index, f) in frames.into_iter().enumerate() {
+            // Protocol 1 and these small enum indexes each occupy one byte.
+            // Never reorder the legacy variants when adding an extension.
+            assert_eq!(encode(&f)[1], index as u8);
             assert_eq!(decode(&encode(&f)), Some(f));
         }
+    }
+
+    #[test]
+    fn activity_extension_does_not_change_legacy_heartbeat_bytes() {
+        let heartbeat = Wire::Heartbeat { status: 1, note: "maps".into() };
+        assert_eq!(encode(&heartbeat), [1, 4, 1, 4, b'm', b'a', b'p', b's']);
+        // An unknown postcard variant fails only this separately framed uni
+        // stream. The next legacy heartbeat remains independently decodable.
+        assert_eq!(decode(&[1, 15, 0]), None);
+        assert_eq!(decode(&encode(&heartbeat)), Some(heartbeat));
+    }
+
+    #[test]
+    fn activity_tags_are_bounded_clean_and_deduplicated() {
+        let mut input = vec![" Maps ".into(), "maps".into(), "\0craft\ning".into(), "".into(), "界".repeat(30)];
+        input.extend((0..30).map(|i| format!("tag{i}")));
+        let tags = clean_tags(&input);
+        assert_eq!(tags.len(), MAX_TAGS);
+        assert_eq!(&tags[..3], ["Maps", "crafting", "界界界界界界界界界界"]);
+        assert!(tags.iter().all(|t| t.len() <= MAX_TAG_BYTES && !t.chars().any(char::is_control)));
     }
 
     #[test]

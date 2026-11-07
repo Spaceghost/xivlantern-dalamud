@@ -72,6 +72,20 @@ Fixed, with `a_node_with_no_database_opens_in_memory` in `tests/two_node.rs`.
 
 ## Reproduce
 
+For the isolated Podman vote-build container, use
+`bash tools/test-wine-container.sh`. It expects the repository mounted read-only
+at `/source`, the completed Windows release library in
+`/build/target/x86_64-pc-windows-gnu/release`, and Wine, Xvfb and MinGW installed in
+the container. Wine setup windows use a private virtual display with TCP
+listening disabled; no host display is connected. `LANTERN_TEST_CONTAINER` can select another disposable builder
+with the same layout. The script compiles the C ABI smoke test with warnings
+treated as errors, creates a fresh prefix under the container's `/tmp`, runs
+with relays disabled and a time limit, then removes the prefix. It never runs
+Wine on the host or uses a game prefix. A successful smoke test verifies the
+native endpoint; it does not verify Dalamud UI, idle-input sampling or audio.
+
+The older Incus setup used these commands:
+
 ```sh
 scripts/sync-to-builder.sh
 incus exec fedora:iroh-build -- bash -lc 'cd /root/xiv-lantern &&
@@ -84,3 +98,132 @@ incus exec fedora:iroh-build -- bash -c 'cd /root/xiv-lantern/target && tar cz -
 incus exec fedora:ghostty-wine -- bash -lc 'cd /root/xiv-lantern-wine/bin &&
   WINEPREFIX=/root/xiv-lantern-wine/prefix wine abi_smoke.exe default'
 ```
+
+The current channel-history source passes 98 default and 109 optional native
+workspace tests plus nine actual C# binding tests against debug and optimized
+Linux libraries. Its expanded Windows smoke fixture checks direct socket
+reachability, signed metadata, byte-exact saved-history delivery and acknowledged
+local clearing. It passes against the current optimized Windows DLL under both
+isolated Fedora 43 and Fedora 44 Wine 11.0 Staging.
+
+The separate Fedora 43 prefix refresh timed out at 60 seconds with RPC/service
+setup errors and no OOM counters, but direct execution in that disposable prefix
+passed (`native/channel-history-wine43-direct-smoke.log`). The reproduce harness
+now bounds prefix refresh at 60 seconds, records its result, stops wineserver
+when refresh fails, then executes the actual ABI smoke independently. The
+executable's exit code remains the gate: missing libraries, native failures or
+timeouts still fail. This revised harness passes in the original Fedora 44
+builder too (`native/channel-history-wine44-smoke.log`). No host/game prefix is
+used. This proves current native Windows ABI behavior, not Dalamud UI or game
+integration.
+
+Optimized artifacts are in `native/channel-history/`; their build log is
+`native/channel-history-optimized-build.log`. The checked local
+`vote-preview-history/latest.zip` contains those Windows bytes and the current
+managed assemblies. It is not installed or published. In-game verification,
+including settings/mute/privacy behavior and loading transitions, remains open.
+
+The subsequent delivery/privacy revision passes all 102 default and 113 optional
+workspace tests, ten actual optimized C# binding tests (including 256-record
+queue pressure) and optimized legacy-library interoperability. Its optimized
+Windows DLL passes the same expanded ABI smoke using the revised Fedora 44
+harness (`native/channel-history-delivery-wine-smoke.log`). Current optimized
+libraries are under `native/channel-history-delivery/`; the checked local
+preview is `vote-preview-history-delivery/latest.zip`. These results include
+blocked-author queue purging, cache invalidation and rejection of late metadata
+for left channels. The package remains uninstalled/unpublished and game
+verification is still required.
+
+The schema-5 remembered-provider revision also passes the actual Windows ABI
+smoke in the isolated Fedora 44 builder
+(`native/channel-history-peer-hint-wine-smoke.log`), including signed metadata,
+exact saved history and acknowledged local clear. Prefix refresh times out;
+the actual executable succeeds afterward. Optimized libraries are under
+`native/channel-history-peers/`; the byte-checked local
+`vote-preview-history-peers/latest.zip` is uninstalled and unpublished. Ten
+optimized C# binding tests include identity-preserving restart and catch-up
+through a previously met provider using the offline creator's original ticket.
+This is not proof of first-contact discovery or in-game behavior.
+
+The name-card revision passes the expanded Windows ABI smoke
+(`native/name-card-wine-smoke.log`) with optional exports required. It resolves
+all three entry points, checks stable local public identity and rejects invalid
+TTL/relay inputs without scheduling a connection. Existing signed metadata,
+saved history and acknowledged clear checks also pass. Prefix refresh still
+times out; the actual executable succeeds afterward. Optimized native artifacts
+are in `native/name-card-invites/`; the six-file byte-checked local
+`vote-preview-name-cards/latest.zip` remains uninstalled/unpublished. Game and
+actual framework/worker/unload/UI verification remain open.
+
+The optimized name-card limits revision also passes the expanded smoke with
+optional exports required (`native/name-card-limits-wine-smoke.log`). Prefix
+refresh times out; the actual executable succeeds afterward. Eleven C# tests
+and actual legacy interoperability pass against these exact optimized libraries.
+The final plugin build has zero warnings/errors, and the six-file byte-checked
+`vote-preview-name-card-limits/latest.zip` includes privacy, rate/event/block
+limits and preparation cancellation. It is uninstalled/unpublished; actual
+framework/unload/UI and game verification remain open.
+
+The isolated wrapper also accepts `LANTERN_TEST_FILE_TRANSFER_REQUIRED=1`.
+It builds `tests/wine/file_transfer.c` with MinGW warnings treated as errors,
+then runs it in the same disposable prefix against the exact Windows DLL.
+The fixture creates two throwaway private identities with public relays off;
+checks authenticated friend metadata, no automatic fetch, explicit byte-exact
+save, refusal to overwrite existing bytes, scoped withdrawal and stale-handle
+rejection; then queues a 16 MiB transfer for cancellation and unfriend.
+A terminal failure must leave no partial destination; a completion that wins
+cancellation/removal must retain all exact bytes. This does not force a cancel
+at a particular filesystem-write boundary or cover Dalamud/framework behavior.
+The wrapper gives this executable a separate 150-second timeout and cleans
+its own temporary prefix/files. Do not use a host or game Wine prefix.
+
+On the current isolated Wine installation, direct selftests succeed but endpoint
+interface discovery produces address-free invites (native InviteFailed says
+“No addressing information available”). The Windows transfer fixture therefore
+uses explicit reciprocal localhost address hints, not production discovery.
+Build the offline `wine_address_hint` example inside the capped native builder
+before enabling this fixture. It serializes NodeTickets from only the synthetic
+public ids and bound UDP ports using the real ticket codec; no bearer invite,
+private key or network socket enters the helper. Its temporary request/reply
+files live in the wrapper's private directory and are removed with the prefix.
+Passing this mode proves a Windows DLL transfer with explicit private routes;
+it does not prove Wine automatic address discovery, NAT or relay behavior.
+
+### Sealed optimized candidate (2026-10-01)
+
+The locked optimized Windows build with nostr enabled passes the disposable
+Wine wrapper with LANTERN_TEST_SEALED_REQUIRED=1 plus name-card, bounded-file,
+friend-file and actual friend-file transfer checks. The new sealed check
+feature-detects four exports, creates a sealed room, verifies ticket prefix,
+imports encrypted bytes on the native worker, reseals with a distinct ticket
+and refuses reusing the old encrypted file in the new room. It makes no
+remote sealed-channel contact. Existing ordinary friend-file transfer still
+uses explicit localhost hints and verifies exact download/overwrite/withdrawal
+and 16 MiB cancellation/unfriend terminal integrity.
+
+The Wine prefix refresh timed out at 60 seconds as before; actual ABI and
+transfer executables passed and the wrapper exited zero. Prefix/display/helper
+cleanup completed. This is neither actual Windows-kernel certification nor
+a sealed Windows peer-to-peer file/history transfer proof or game proof.
+Log: ../xiv-lantern-build/native/sealed-native-wine-tests.log
+Windows DLL SHA256: 614bdefe44502df29f9cb07dcd7f5076981c7ca5fa7f7583b2bf05ef1dfab421
+
+### Actual sealed Windows peer exchange (2026-10-01)
+
+With the current optimized Windows DLL and LANTERN_TEST_SEALED_REQUIRED=1,
+the expanded private file fixture now creates a sealed channel across two
+Windows DLL instances. Explicit test-only localhost hints avoid Wine's
+address discovery limitation. The receiver obtains an encrypted history
+snapshot whose original record/signature matches the creator's, then
+downloads/decrypts 65537 exact bytes. Generic ciphertext export and overwrite
+are refused; withdrawal invalidates the offer and preserves saved bytes.
+A fresh-key room refuses the old encrypted file. A 16 MiB encrypted download
+is canceled and ends with intact completion or no partial file. Existing
+ordinary friend transfer/cancellation/unfriend checks also pass.
+
+Wrapper exit zero: ../xiv-lantern-build/native/sealed-peer-wine-tests.log.
+All identities/keys/files are synthetic and confined to a disposable prefix.
+The native DLL is unchanged from the optimized build already recorded.
+This proves actual Windows-binary peer exchange under Wine with explicit
+loopback routes, not automatic discovery, Internet traversal, actual Windows
+kernel behavior, forced mid-write cancellation or Dalamud/game lifecycle.
