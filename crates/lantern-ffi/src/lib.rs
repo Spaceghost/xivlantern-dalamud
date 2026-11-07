@@ -1937,7 +1937,7 @@ mod tests {
         use std::collections::BTreeMap;
         let header = include_str!("../../../include/lantern.h");
         // Optional entry points live in their own module but share this header.
-        let source = format!("{}\n{}", include_str!("lib.rs"), include_str!("nostr.rs"));
+        let source = format!("{}\n{}\n{}", include_str!("lib.rs"), include_str!("nostr.rs"), include_str!("sealed.rs"));
 
         let declared: std::collections::BTreeSet<&str> = header
             .lines()

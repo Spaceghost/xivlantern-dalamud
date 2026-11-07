@@ -13,6 +13,12 @@ Statuses mean the same thing in every one of these mods:
 * **BETA** — merged, but not yet verified in game.
 * **SOON** — still being built.
 
+## [Unreleased] — In development
+
+Experimental host-tested work; Windows/Wine and in-game acceptance remain pending.
+
+* Experimental communication build: local friend folders and safety-word comparison, status presets, optional automatic away and activity tags, pull countdowns, bounded file transfer, channel history and sealed-channel components. Native, binding and managed tests run without the game. Windows/Wine execution, game UI and end-to-end release acceptance remain unverified; use the testing channel only.
+
 ## [0.1.0] — Released 2026-09-23
 
 BETA entries are in this release but have not been verified in game yet; they become NEW or FIX once they have been seen working.
